@@ -161,7 +161,7 @@ cython_debug/
 
 .vscode/
 plots/
-data/
+./data/
 logs/
 jobs/
 wandb/
