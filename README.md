@@ -136,3 +136,5 @@ If this code is useful to your research, please cite our preprint:
       url={https://arxiv.org/abs/2405.13214}, 
 }
 ```
+
+This work was also presented as a poster at the AI for Science workshop at ICML 2024 and the Institute for Mathematical and Statistical Innovation's (IMSI) Computational Imaging Workshop.
