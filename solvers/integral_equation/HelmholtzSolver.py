@@ -7,7 +7,6 @@ import logging
 import numpy as np
 
 import torch
-import cola
 
 from typing import Tuple
 from scipy.sparse.linalg import LinearOperator, gmres
@@ -26,6 +25,10 @@ logging.getLogger("numpy").setLevel(logging.WARNING)
 logging.getLogger("plum").setLevel(logging.WARNING)
 logging.getLogger("plum-dispatch").setLevel(logging.WARNING)
 logging.getLogger("plum-dispatch").setLevel(logging.WARNING)
+
+
+GMRES_ATOL = 1e-2
+GMRES_RTOL = 1e-2
 
 
 class HelmholtzSolverBase:
@@ -77,16 +80,24 @@ class HelmholtzSolverBase:
         return uin
 
     def _get_uin_sigma(
-        self, source_directions: torch.Tensor, scattering_obj: torch.Tensor
+        self,
+        source_directions: torch.Tensor,
+        scattering_obj: torch.Tensor,
+        rtol: float = GMRES_RTOL,
+        atol: float = GMRES_ATOL,
+        radially_symmetric: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """For a batch of source directions, this function generates the incoming
         plane waves uin, and also generates solutions to the integral equation
 
-        int_{x in \Omega} (I + k^2 diag(q) G) sigma = -k^2 uin q
+        int_{x in \\Omega} (I + k^2 diag(q) G) sigma = -k^2 uin q
 
         Args:
             source_direction (torch.Tensor): Has shape (n_directions,)
             scattering_obj (torch.Tensor): shape (N, N)
+            rtol (float, optional): Relative tolerance for GMRES. Defaults to GMRES_RTOL.
+            atol (float, optional): Absolute tolerance for GMRES. Defaults to GMRES_ATOL.
+            radially_symmetric (bool, optional): If True, incident wave field is J_0(k|x|).
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: First output is uin which has shape
@@ -102,7 +113,13 @@ class HelmholtzSolverBase:
             sigma = torch.zeros((source_directions.shape[0], self.N**2))
 
         else:
-            sigma = self._gmres_Helmholtz_inv(scattering_obj, uin)
+            sigma = self._gmres_Helmholtz_inv(
+                scattering_obj,
+                uin,
+                rtol=rtol,
+                atol=atol,
+                radially_symmetric=radially_symmetric,
+            )
         return uin, sigma
 
     def _G_apply(self, x: np.ndarray) -> np.ndarray:
@@ -122,16 +139,48 @@ class HelmholtzSolverBase:
         """
         raise NotImplementedError()
 
+    def _get_b(
+        self, uin: torch.Tensor, q: torch.Tensor, radially_symmetric: bool = False
+    ) -> torch.Tensor:
+        """Generates the right-hand side of the integral equation
+
+        int_{x in \\Omega} (I + k^2 diag(q) G) sigma = -k^2 uin q
+
+
+        If radially_symmetric is True, then we assume q() is radially symmetric
+        and return -k^2 q J_0(k|x|) which is also radially symmetric. This is
+        used for checking against a reference solution.
+
+        Args:
+            uin (torch.Tensor): Has shape (n_directions, N**2)
+            q (torch.Tensor): Has shape (N, N)
+
+        Returns:
+            torch.Tensor: Has shape (n_directions, N**2)
+        """
+        if radially_symmetric:
+            k = self.frequency
+            r_vals = torch.norm(self.domain_points, dim=-1).to(self.device)
+            bessel_evals = torch.special.bessel_j0(k * r_vals)
+            b = (-(self.frequency**2) * q.flatten() * bessel_evals).unsqueeze(0)
+        else:
+            b = -(self.frequency**2) * q * uin.permute(1, 0)
+            b = b.permute(1, 0)
+        return b.to(torch.cfloat).cpu().numpy()
+
     def _gmres_Helmholtz_inv(
         self,
         scattering_obj: np.ndarray,
         uin: np.ndarray,
+        rtol: float = GMRES_RTOL,
+        atol: float = GMRES_ATOL,
+        radially_symmetric: bool = False,
     ) -> np.ndarray:
         """
 
         Generates a solution to the integral equation
 
-        int_{x in \Omega} (I + k^2 diag(q) G) sigma = -k^2 uin q
+        int_{x in \\Omega} (I + k^2 diag(q) G) sigma = -k^2 uin q
 
         Args:
             scattering_obj (np.ndarray): Has shape (N, N)
@@ -142,54 +191,85 @@ class HelmholtzSolverBase:
         Returns:
             np.ndarray: Has shape (n_directions, self.N**2)
         """
-        # print(
-        #     "_gmres_Helmholtz_inv: scattering_obj shape and device",
-        #     scattering_obj.shape,
-        #     scattering_obj.device,
-        # )
-        # print("_gmres_Helmholtz_inv: uin shape and device", uin.shape, uin.device)
 
         n = scattering_obj.shape[0]
+
+        # q has shape (N**2, 1)
         q = scattering_obj.flatten().unsqueeze(-1)
-        # print("_gmres_Helmholtz_inv: q shape", q.shape)
 
-        def _matvec(x: torch.Tensor) -> torch.Tensor:
-            # print("_matvec: input shape: ", x.shape)
+        # b is the RHS of the integral equation.
+        # b has shape (n_directions, N**2)
+        b = self._get_b(uin, q, radially_symmetric=radially_symmetric)
+
+        n_src = b.shape[0]
+
+        def _matvec(x: np.array) -> np.array:
+            """
+            x has shape (N**2,)
+            return value has shape (N**2,)
+
+            code is written to be compatible with scipy.sparse.linalg.LinearOperator
+            """
+
+            # Move to GPU and expand the -1 dimension
+            x = torch.from_numpy(x).to(self.device).unsqueeze(-1)
+
+            # Compute Gx
             gout = self._G_apply(x)
+            # Compute k^2 Q Gx
             term2 = (self.frequency**2) * q * gout
-            # print("_matvec: term2 shape and device: ", term2.shape, term2.device)
+            # Compute (I + k^2 Q G)x
             y = x + term2.to(torch.cfloat)
-            # print("_matvec: output device: ", y.device)
-            # print("_matvec: output shape: ", y.shape)
-            return y
+            # Return to CPU
+            return y.cpu().numpy().flatten()
 
-        A = cola.ops.LinearOperator(
-            torch.complex64,
-            (self.N**2, self.N**2),
-            matmat=_matvec,
+        A = LinearOperator(
+            shape=(self.N**2, self.N**2),
+            matvec=_matvec,
+            dtype=np.complex64,
         )
 
-        # X = A.to(self.device)
-        A.device = self.device
-        # print("_gmres_Helmholtz_inv: new A operator on device: ", A.device)
-        b = -(self.frequency**2) * q * uin.permute(1, 0)
-        b = b.to(torch.cfloat)
-        # print("_gmres_Helmholtz_inv: b shape: ", b.shape)
-        # print("_gmres_Helmholtz_inv: b device: ", b.device)
+        # sigma has shape (n_directions, N**2)
+        sigma = torch.zeros(b.shape, device=self.device, dtype=torch.cfloat)
 
-        sigma, out_info = cola.algorithms.gmres(A, b)
+        for i in range(n_src):
+            b_i = b[i]
+            sigma_i, ret_code = gmres(
+                A,
+                b_i,
+                atol=atol,
+                rtol=rtol,
+                restart=50,
+            )
+            if ret_code != 0:
+                logging.warning(
+                    "GMRES failed to converge for source direction %i. Re-running with a different restart value",
+                    i,
+                )
+                # sigma_i, ret_code = gmres(
+                #     A,
+                #     b_i,
+                #     atol=atol,
+                #     rtol=rtol,
+                #     restart=20,
+                # )
+                # logging.warning(
+                #     "After running with higher restart value, ret_code = %i", ret_code
+                # )
+            sigma[i] = torch.from_numpy(sigma_i)
+            # logging.debug("_gmres_Helmholtz_inv: working on source %i / %i", i, n_src)
 
-        out = sigma.permute(1, 0)
+        # return value has shape (n_directions, N**2)
+        out = sigma
 
-        # logging.warning(
-        #     f"_gmres_Helmholtz_inv: GMRES exited after {out_info['iterations']} iterations"
-        #     f" with a final error of {out_info['errors'][-1]:.4e}"  # Is this the right error?
-        # )
-        # print("_gmres_Helmholtz_inv: output shape: ", out.shape)
         return out
 
     def Helmholtz_solve_exterior(
-        self, source_directions: np.ndarray, scattering_obj: np.ndarray
+        self,
+        source_directions: np.ndarray,
+        scattering_obj: np.ndarray,
+        rtol: float = GMRES_RTOL,
+        atol: float = GMRES_ATOL,
     ) -> np.ndarray:
         """Solve the Helmholtz equation on the exterior ring for a given source
         direction and a given scattering object.
@@ -205,44 +285,69 @@ class HelmholtzSolverBase:
         """
         directions_torch = torch.from_numpy(source_directions).to(self.device)
         scattering_obj_torch = torch.from_numpy(scattering_obj).to(self.device)
-        _, sigma = self._get_uin_sigma(directions_torch, scattering_obj_torch)
-        # print("Helmholtz_solve_exterior: sigma shape: ", sigma.shape)
-        # print(
-        #     "Helmholtz_solve_exterior: exterior_greens_function shape: ",
-        #     self.exterior_greens_function.shape,
-        # )
+        # sigma has shape (n_srces, N**2)
+        _, sigma = self._get_uin_sigma(
+            directions_torch, scattering_obj_torch, rtol=rtol, atol=atol
+        )
 
         FP = self.exterior_greens_function @ sigma.permute(1, 0)
-        # FP = np.reshape(FP, (1, -1))
 
+        # Return value has shape (n_srces, N)
         return FP.permute(1, 0).cpu().numpy()
 
     def Helmholtz_solve_interior(
-        self, source_directions: np.ndarray, scattering_obj: np.ndarray
+        self,
+        source_directions: np.ndarray,
+        scattering_obj: np.ndarray,
+        rtol: float = GMRES_RTOL,
+        atol: float = GMRES_ATOL,
+        radially_symmetric: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Solves the Helmholtz equation on the scattering domain.
         Returns the total wave field, the scattered wave field, and the incident wave field.
 
         Args:
-            source_direction (float): _description_
+            source_direction (float): Has shape (n_src,)
             scattering_obj (np.ndarray): Has shape (N, N)
 
         Returns:
             Tuple[np.ndarray, np.ndarray, np.ndarray]: (u_tot, u_in, u_scat).
-            Each has shape (N, N)
+            Each has shape (n_src, N, N)
         """
         n_directions = source_directions.shape[0]
         out_shape = (n_directions, self.N, self.N)
         directions_torch = torch.from_numpy(source_directions).to(self.device)
         scattering_obj_torch = torch.from_numpy(scattering_obj).to(self.device)
-        uin, sigma = self._get_uin_sigma(directions_torch, scattering_obj_torch)
-        # print("Helmholtz_solve_interior: uin shape: ", uin.shape)
-        # print("Helmholtz_solve_interior: sigma shape: ", sigma.shape)
 
+        # sigma has shape (n_directions, N**2)
+        # uin has shape (n_directions, N**2)
+        uin, sigma = self._get_uin_sigma(
+            directions_torch,
+            scattering_obj_torch,
+            rtol=rtol,
+            atol=atol,
+            radially_symmetric=radially_symmetric,
+        )
+        print("Helmholtz_solve_interior: uin shape", uin.shape)
+        print("Helmholtz_solve_interior: sigma shape", sigma.shape)
+
+        if radially_symmetric:
+            r_vals = torch.norm(self.domain_points, dim=-1)
+            # In this case, we need to make the radially-symmetric incident wave field
+            # with shape (1, N**2)
+            uin = (
+                torch.special.bessel_j0(self.frequency_torch * r_vals)
+                .to(sigma.device)
+                .unsqueeze(0)
+            )
+            print("Helmholtz_solve_interior: uin shape", uin.shape)
+            out_shape = (1, self.N, self.N)
+
+        # _G_apply expects sigma to have shape (N**2, n_directions) so we have to transpose.
+        # The return value has shape (N**2, n_directions); we apply a transpose so
+        # u_s has shape (n_directions, N**2)
         u_s = self._G_apply(sigma.permute(1, 0)).permute(1, 0)
-        # print("Helmholtz_solve_interior: u_s shape: ", u_s.shape)
-        # print("Uin shape: ", uin.shape)
-        # print("U_s shape: ", u_s.shape)
+        print("Helmholtz_solve_interior: u_s shape", u_s.shape)
         u_tot = u_s + uin
 
         return (

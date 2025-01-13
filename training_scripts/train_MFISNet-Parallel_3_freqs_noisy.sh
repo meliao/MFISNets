@@ -38,7 +38,7 @@ python train_MFISNet_Parallel.py \
 -kernel_size_1d 40 \
 -kernel_size_2d 5 \
 -dont_use_wandb \
--weight_decay 0.0 \
+-weight_decay 1e-3 \
 -seed 1001 \
 -batch_size 16 \
 -dont_write_outputs \

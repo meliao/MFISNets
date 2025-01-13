@@ -43,3 +43,21 @@ KEYS_FOR_EXPERIMENT_INFO_OUT = [
     SEED,
     FILE_COMPLETION,
 ]
+
+# Keys to help with properly concatenating inputs
+FREQ_DEPENDENT_KEYS = [
+    D_MH,
+    D_RS,
+    Q_CART_LPF,
+    Q_POLAR_LPF,
+    NU_SF,
+    OMEGA_SF,
+]
+TRUNCATABLE_KEYS = [
+    Q_POLAR,
+    Q_CART,
+    D_MH,
+    D_RS,
+    Q_POLAR_LPF,
+    Q_CART_LPF,
+]

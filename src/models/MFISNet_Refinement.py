@@ -15,6 +15,7 @@ from src.models.FYNet import FYNetInverse
 from src.utils.conv_ops import apply_conv_with_polar_padding
 
 from typing import Dict
+import logging
 
 class MFISNet_Refinement(torch.nn.Module):
     def __init__(
@@ -30,6 +31,7 @@ class MFISNet_Refinement(torch.nn.Module):
         N_freqs: int,
         freq_pred_idx: int = None,
         return_all_q_hats: bool = False,
+        init_mode: str = None,
     ) -> None:
         """
         We are calling this MFISNet-Refinement. It filters the
@@ -64,6 +66,9 @@ class MFISNet_Refinement(torch.nn.Module):
         self.N_cnn_2d = N_cnn_2d
         self.N_freqs = N_freqs
 
+        init_mode = init_mode.lower() if init_mode is not None else "original"
+        self.init_mode = init_mode
+
         if freq_pred_idx is None:
             self.freq_pred_idx = self.N_freqs - 1
         else:
@@ -84,6 +89,7 @@ class MFISNet_Refinement(torch.nn.Module):
             w_2d=self.w_2d,
             N_cnn_1d=self.N_cnn_1d,
             N_cnn_2d=self.N_cnn_2d,
+            init_mode=init_mode,
         )
         self.inverse_networks.append(inv_model_0)
         for i in range(self.N_freqs - 1):
@@ -96,6 +102,7 @@ class MFISNet_Refinement(torch.nn.Module):
                 w_2d=self.w_2d,
                 N_cnn_1d=self.N_cnn_1d,
                 N_cnn_2d=self.N_cnn_2d,
+                init_mode=init_mode,
             )
             self.inverse_networks.append(inv_model)
 
@@ -106,6 +113,7 @@ class MFISNet_Refinement(torch.nn.Module):
                 n_feature_channels=self.c_2d,
                 kernel_size=self.w_2d,
                 skip_connection=True,
+                init_mode=init_mode,
             )
             self.filtering_blocks.append(filter_block)
 
@@ -167,6 +175,8 @@ class KLayer2DCNN(torch.nn.Module):
         n_feature_channels: int,
         kernel_size: int,
         skip_connection: bool = False,
+        init_mode: str = None,
+        angular_axis_last: bool = False,
     ) -> None:
         super().__init__()
         self.n_layers = n_layers
@@ -176,39 +186,40 @@ class KLayer2DCNN(torch.nn.Module):
         self.kernel_size = kernel_size
         self.skip_connection = skip_connection
 
+        self.real_dtype = torch.float32
+
+        init_mode = init_mode.lower() if init_mode is not None else "original"
+        self.init_mode = init_mode
+
         padding_2d = int(kernel_size / 2 - 1) + 1
         self.cnn_layers = torch.nn.ParameterList()
-        self.cnn_layers.append(
-            torch.nn.Conv2d(
-                in_channels=self.n_in_channels,
-                out_channels=self.n_feature_channels,
-                kernel_size=self.kernel_size,
-                padding=padding_2d,
-                padding_mode="circular",
-            )
-        )
-        for _ in range(self.n_layers - 2):
-            self.cnn_layers.append(
-                torch.nn.Conv2d(
-                    in_channels=self.n_feature_channels,
-                    out_channels=self.n_feature_channels,
-                    kernel_size=self.kernel_size,
-                    padding=padding_2d,
-                    padding_mode="circular",
-                )
-            )
 
-        # Append the last one
-        self.cnn_layers.append(
-            torch.nn.Conv2d(
-                in_channels=self.n_feature_channels,
-                out_channels=self.n_out_channels,
+        channel_dims = [
+            n_in_channels,  # Input (=1)
+            *((n_layers - 1) * [n_feature_channels]),  # Interior
+            n_out_channels,  # Final layer (=1)
+        ]
+        logging.info(
+            f"During the k-layer 2D CNN stage, the numbers of channels are {channel_dims}"
+        )
+        self.cnn_layers = torch.nn.ParameterList([])
+        for li in range(n_layers):
+            channel_dim_in = channel_dims[li]
+            channel_dim_out = channel_dims[li + 1]
+
+            new_layer = torch.nn.Conv2d(
+                in_channels=channel_dim_in,
+                out_channels=channel_dim_out,
                 kernel_size=self.kernel_size,
                 padding=padding_2d,
-                padding_mode="circular",
+                padding_mode="zeros",
             )
-        )
+            if init_mode == "he-normal":
+                torch.nn.init.kaiming_normal_(new_layer.weight, nonlinearity="relu")
+            self.cnn_layers.append(new_layer)
+
         self.relu = torch.nn.ReLU()
+        self.angular_axis_last = angular_axis_last
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Assume x has shape (batch, self.n_in_channels, X, Y)
@@ -217,17 +228,16 @@ class KLayer2DCNN(torch.nn.Module):
         If skip_connection is specified, then the slice (:, :-1, :, :)
         will be added to the output
         """
-
         if self.skip_connection:
             add_slice = x[:, -1].unsqueeze(1)
 
-        for i in range(self.n_layers - 1):
-            layer_i = self.cnn_layers[i]
-            x = apply_conv_with_polar_padding(layer_i, x)
-            x = self.relu(x)
-
-        last_layer = self.cnn_layers[-1]
-        out = apply_conv_with_polar_padding(last_layer, x)
+        for i, layer_i in enumerate(self.cnn_layers):
+            x = apply_conv_with_polar_padding(
+                layer_i, x, angular_axis_last=self.angular_axis_last
+            )
+            if i + 1 < self.n_layers:
+                x = self.relu(x)
+        out = x
 
         if self.skip_connection:
             out = out + add_slice

@@ -13,13 +13,12 @@ import os, psutil  # to fetch memory usage
 from src.data.add_noise import add_noise_to_d
 
 from src.data.data_io import (
-    load_dir,
+    load_dir, load_multifreq_dataset
 )
 from src.models.MFISNet_Fused import MFISNet_Fused
 from src.training_utils.train_loop import train, evaluate_losses_on_dataloader
-from src.training_utils.loss_functions import (
-    MSEModule,
-)
+from src.training_utils.loss_functions import MSEModule
+
 from src.utils.logging_utils import FMT, TIMEFMT, write_result_to_file, hash_dict
 
 from src.data.data_naming_constants import (
@@ -32,25 +31,9 @@ from src.data.data_naming_constants import (
     NU_SF,
     OMEGA_SF,
     KEYS_FOR_TRAINING_SAMPLES_ALL,
+    FREQ_DEPENDENT_KEYS,
+    TRUNCATABLE_KEYS,
 )
-
-FREQ_DEPENDENT_KEYS = [
-    D_MH,
-    D_RS,
-    Q_CART_LPF,
-    Q_POLAR_LPF,
-    NU_SF,
-    OMEGA_SF,
-]
-TRUNCATABLE_KEYS = [
-    Q_POLAR,
-    Q_CART,
-    D_MH,
-    D_RS,
-    Q_POLAR_LPF,
-    Q_CART_LPF,
-]
-
 
 def setup_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -61,6 +44,11 @@ def setup_args() -> argparse.Namespace:
         " corresponding to the relevant frequencies and data subsets",
     )
     parser.add_argument("--data_input_nus", type=str, nargs="+")
+
+    # New option to use smoothed targets or not
+    parser.add_argument("--use_smoothed_targets", default=False, action="store_true")
+    parser.add_argument("--use_original_targets", action="store_false", dest="use_smoothed_targets")
+
     parser.add_argument("--eval_on_test_set", default=False, action="store_true")
     parser.add_argument(
         "--no_eval_on_test_set", action="store_false", dest="eval_on_test_set"
@@ -96,6 +84,16 @@ def setup_args() -> argparse.Namespace:
     parser.add_argument(
         "--noise_to_signal_ratio", default=None, type=float
     )  # train and test with noise
+    parser.add_argument(
+        "--init_mode",
+        default="original",
+        choices = [
+            "original",
+            "uniform-with-old-scale",
+            "normal-with-old-scale",
+            "he-normal",
+        ],
+    )
 
     # Weights and Biases setup
     parser.add_argument("--wandb_project", type=str, help="W&B project name")
@@ -114,11 +112,11 @@ def setup_args() -> argparse.Namespace:
 
     return a
 
-
 class LinearData(torch.utils.data.Dataset):
-    def __init__(self, X: torch.Tensor, y: torch.Tensor) -> None:
+    def __init__(self, X: torch.Tensor, y: torch.Tensor, y_orig: torch.Tensor=None) -> None:
         self.X = X
         self.y = y
+        self.y_orig = y_orig if y_orig is not None else y
         logging.info(
             "Initialized a LinearData instance with X shape: %s and y shape: %s",
             self.X.shape,
@@ -130,135 +128,13 @@ class LinearData(torch.utils.data.Dataset):
         return self.n_samples
 
     def __getitem__(self, idx):
-        # (OOT 6/4/2024) Gives two copies of the target because the training
-        # loop seems to expect a filtered and final version of the sample
-        return self.X[idx], self.y[idx], self.y[idx]
+        return self.X[idx], self.y[idx], self.y_orig[idx]
 
-
-def load_multifreq_dataset(
-    freq_dir_list: List[str],
-    # concat_wave_fields: bool = False,
-    # no_filtering_bool: bool = False,
-    truncate_num: int = None,
-    key_replacement: dict = None,
-    noise_to_sig_ratio: float = None,
-    add_noise_to: str = None,
-    load_cart: bool = False,
-    nan_mode: str = None,
-) -> dict:
-    """
-    Helper function to load datasets containing multiple frequencies
-    Allows for replacing keys to ensure the right naming convention
-
-    Parameters:
-        freq_dir_list (List of str): give the different directories corresponding to the different frequencies
-        truncate_num (int): the number of samples to be loaded
-        key_replacement (dict): key mapping in case old field names need to be overriden
-            Note: should not be needed but is left as a courtesy to outdated code
-        noise_to_sig_ratio (float): level of noise relative to the signal
-        add_noise_to (str): specify whether to add noise to "d_mh" or "d_rs".
-            Only adds to one of these because the noise patterns will be different on each
-        nan_mode (str): choose between "zero" out nan entries or "skip" entire samples containing a nan
-
-    Outputs:
-        dd (dict): dictionary representing the dataset
-    """
-    N_freqs = len(freq_dir_list)
-    dd_list = []
-    for dir_name in freq_dir_list:
-        logging.info(f"Loading dataset from {dir_name}")
-        dd_new = load_dir(
-            dir_name,  # pass as scobj dir
-            dir_name,  # pass as meas  dir
-            truncate_num=truncate_num,
-            # load_all_fields=True,
-            # new_naming_mode=True,
-            # key_replacement=key_replacement,
-            load_cart_and_rs=load_cart,
-        )
-        dd_list.append(dd_new)
-
-    # Set up the dictionary for fixed values and fields that will get multiple frequencies
-    dd_all = dict()
-    simple_fdk_list = []
-    present_fdk_list = []
-    for key, val in dd_list[0].items():
-        if key not in FREQ_DEPENDENT_KEYS:  # or key in [OMEGA_SF, NU_SF]:
-            dd_all[key] = val
-        elif key in {OMEGA_SF, NU_SF}:
-            dd_all[key] = np.zeros(N_freqs)
-            simple_fdk_list.append(key)
-        else:
-            # Assume we always just put the new frequency index in dim 1
-            curr_shape = dd_list[0][key].shape
-            logging.info(f"Found fdk {key} whose entry has shape {curr_shape}")
-            new_shape = tuple([*curr_shape[:1], N_freqs, *curr_shape[1:]])
-            dd_all[key] = np.zeros(new_shape, dtype=dd_list[0][key].dtype)
-            present_fdk_list.append(key)
-
-    for fdk in present_fdk_list:
-        for fi in range(N_freqs):
-            logging.info(
-                f"(key {fdk}) Loading value of shape {dd_list[fi][fdk].shape} into a slice"
-                f" of {dd_all[fdk].shape}"
-            )
-            dd_all[fdk][:, fi] = dd_list[fi][fdk]
-    for simple_fdk in simple_fdk_list:
-        for fi in range(N_freqs):
-            dd_all[simple_fdk][fi] = dd_list[fi][simple_fdk].item()
-
-    # Deal with NaNs; determine using d_mh
-    nan_mode = nan_mode.lower() if nan_mode is not None else "skip"
-    if nan_mode == "keep":
-        # Keep the NaNs
-        for key in TRUNCATABLE_KEYS:
-            if key in dd_all.keys() and key in KEYS_FOR_TRAINING_SAMPLES_ALL:
-                dd_all[key] = np.nan_to_num(dd_all[key], copy=False, nan=np.nan)
-    if nan_mode == "zero":
-        # Zero out for everything
-        for key in TRUNCATABLE_KEYS:
-            if key in dd_all.keys() and key in KEYS_FOR_TRAINING_SAMPLES_ALL:
-                dd_all[key] = np.nan_to_num(dd_all[key], copy=False, nan=0)
-    elif nan_mode == "skip":
-        # wave_field_mh shape: (N_samples, N_freqs, N_m, N_h)
-        keep_idcs = np.logical_not(np.any(np.isnan(dd_all[D_MH][:, :, 0, 0]), axis=1))
-        for key in TRUNCATABLE_KEYS:
-            if key in dd_all.keys() and key in KEYS_FOR_TRAINING_SAMPLES_ALL:
-                dd_all[key] = dd_all[key][keep_idcs]
-
-    # Add noise if applicable
-    if noise_to_sig_ratio is not None:
-        add_noise_to = add_noise_to.lower() if add_noise_to is not None else "d_mh"
-        if add_noise_to == "d_mh":
-            dd_all[D_MH] = add_noise_to_d(dd_all[D_MH], noise_to_sig_ratio)
-        elif add_noise_to == "d_rs":
-            dd_all[D_RS] = add_noise_to_d(dd_all[D_RS], noise_to_sig_ratio)
-        else:
-            raise ValueError(
-                f"Did not recognize {add_noise_to} as a valid field to add noise to."
-                f" Please enter either 'd_mh' or 'd_rs'."
-            )
-        logging.info(
-            f"Applied noise at {noise_to_sig_ratio:.2f} to field '{add_noise_to}'"
-        )
-
-    # Apply key replacement
-    key_replacement = key_replacement if key_replacement is not None else {}
-
-    # Replace one key at a time to reduce memory overhead...hopefully...
-    for old_key in key_replacement.keys():
-        if old_key not in dd_all.keys():
-            continue  # skip if key is invalid
-        new_key = key_replacement[key]
-        if new_key == old_key:
-            continue  # skip if no move is required
-        dd_all[new_key] = dd_all[old_key]
-        del dd_all[old_key]
-
-    return dd_all
-
-
-def setup_single_dataset(q_polar: np.ndarray, wave_field_mh: np.ndarray) -> LinearData:
+def setup_single_dataset(
+    q_polar: np.ndarray,
+    wave_field_mh: np.ndarray,
+    q_polar_orig: np.ndarray = None,
+) -> LinearData:
     """
     Set up a single (multi-frequency) dataset (such as training/eval)
     Parameters:
@@ -270,7 +146,12 @@ def setup_single_dataset(q_polar: np.ndarray, wave_field_mh: np.ndarray) -> Line
     """
     inputs_dset = torch.view_as_real(torch.from_numpy(wave_field_mh))
     targets_dset = torch.from_numpy(q_polar)
-    dset = LinearData(inputs_dset, targets_dset)
+    targets_orig_dset = torch.from_numpy(q_polar_orig) if q_polar_orig is not None else None
+    dset = LinearData(
+        inputs_dset,
+        targets_dset,
+        targets_orig_dset,
+    )
     return dset
 
 
@@ -338,7 +219,7 @@ def main(
     #     # "Input_Cart": "q_cart",
     # }
     logging.info(f"Loading training dataset")
-    train_dd = load_multifreq_dataset(
+    train_dd, train_meta_dd = load_multifreq_dataset(
         train_files,
         truncate_num=args.truncate_num,
         # key_replacement=key_replacement,
@@ -365,7 +246,7 @@ def main(
 
     # Evaluation data dictionary
     logging.info(f"Loading evaluation dataset")
-    eval_dd = load_multifreq_dataset(
+    eval_dd, eval_meta_dd = load_multifreq_dataset(
         test_files if args.eval_on_test_set else val_files,
         truncate_num=args.truncate_num_val,
         # key_replacement=key_replacement,
@@ -378,9 +259,21 @@ def main(
     logging.info(f"eval_dd has entries with shapes: {eval_dd_short}")
 
     # logging.info(f"Received a dictionary with keys: {list(train_dd.keys())}")
-    train_q_polar = train_dd["q_polar"]
-    # train_q_cart  = train_dd["q_cart"]
-    train_d_mh = train_dd["d_mh"]
+    if args.use_smoothed_targets:
+        logging.info(f"Using smoothed targets for training and validation")
+        train_q_polar = train_dd[Q_POLAR_LPF][:, -1, ...]
+        eval_q_polar  = eval_dd[Q_POLAR_LPF][:, -1, ...]
+    else:
+        logging.info(f"Using original targets for training and validation")
+        train_q_polar = train_dd[Q_POLAR]
+        eval_q_polar  = eval_dd[Q_POLAR]
+
+    # Also provide an alias for the original target regardless of training setting
+    train_q_polar_orig = train_dd[Q_POLAR]
+    eval_q_polar_orig  = eval_dd[Q_POLAR]
+
+    train_d_mh = train_dd[D_MH]
+    eval_d_mh  = eval_dd[D_MH]
 
     rho_vals = train_dd["rho_vals"]
     theta_vals = train_dd["theta_vals"]
@@ -392,11 +285,12 @@ def main(
     N_h = h_vals.shape[0]
     N_theta = theta_vals.shape[0]
     N_train = train_q_polar.shape[0]
-    N_eval = eval_dd["q_polar"].shape[0]
+    N_eval = eval_q_polar.shape[0]
 
-    # Next... run the "setup_dataset" function (may require re-organizing)
-    train_dset = setup_single_dataset(train_q_polar, train_d_mh)
-    eval_dset = setup_single_dataset(eval_dd["q_polar"], eval_dd["d_mh"])
+    # Next... run the "setup_single_dataset" function
+    # to-do: make sure this is functioning as expected...
+    train_dset = setup_single_dataset(train_q_polar, train_d_mh, train_q_polar_orig)
+    eval_dset  = setup_single_dataset(eval_q_polar, eval_d_mh, eval_q_polar_orig)
     logging.info(f"Finished loading data. N_train={N_train}, N_eval={N_eval}")
 
     ### Prepare for NN training ###
@@ -406,6 +300,16 @@ def main(
     # Send to the data loader
     train_dloader = torch.utils.data.DataLoader(train_dset, batch_size=args.batch_size)
     eval_dloader = torch.utils.data.DataLoader(eval_dset, batch_size=args.batch_size)
+
+    extra_params = {}
+    # Skip it for now... doesnt seem to do much...?
+    # extra_params = {
+    #     **extra_params,
+    #     "train_inputs_mean":  train_dset.X.mean(),
+    #     "train_inputs_std":   train_dset.X.std(),
+    #     "train_outputs_mean": train_dset.y.mean(),
+    #     "train_outputs_std":  train_dset.y.std(),
+    # }
 
     # Initialize the model
     model = MFISNet_Fused(
@@ -420,7 +324,9 @@ def main(
         N_cnn_2d=args.n_cnn_2d,
         merge_middle_freq_channels=args.merge_middle_freq_channels_bool,
         big_init=args.big_init,
+        init_mode=args.init_mode,
         polar_padding=args.polar_padding_bool,
+        **extra_params,
     )
 
     ########################### Training procedure ###########################
@@ -458,6 +364,7 @@ def main(
             Need to set:
             - loss_fn_dd
             """
+            nonlocal train_dloader, eval_dloader
             with torch.no_grad():
                 epoch_eff = epoch_stagger + epoch_local
 
@@ -531,9 +438,7 @@ def main(
                     "eta_min": args.eta_min,
                     "n_rho_vals": N_rho,
                     "n_theta_vals": N_theta,
-                    # "omega_0_idx": args.omega_0_idx,
-                    # "skip_connections": args.skip_connections,
-                    # "forward_network": args.forward_network,
+                    "init_mode": args.init_mode,
                     "hash": id_hash,
                     # Extra data
                     "source_nu_list": nu_list,

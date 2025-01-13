@@ -27,9 +27,9 @@ python train_MFISNet_Refinement.py \
 -n_epochs_pretrain 50 \
 -n_epochs_finetune 50 \
 -n_epochs_per_log 5 \
--lr_init 1e-03 \
--lr_decrease_factor 0.25 \
--eta_min 1e-03 \
+-lr_init 5e-04 \
+-lr_decrease_factor 1.0 \
+-eta_min 5e-04 \
 -n_cnn_channels_1d 24 \
 -n_cnn_channels_2d 24 \
 -n_cnn_1d 3 \

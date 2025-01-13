@@ -55,7 +55,7 @@ class Test_polar_conv:
 
         # Compare the usual evaluation against a rolled version (equivariant to rotations about the origin)
         # center_slice = np.s_[..., pad_width: -pad_width, pad_width: -pad_width]
-        dupl_rho_zero = True
+        dupl_rho_zero = False
         output_tensor = apply_conv_with_polar_padding(conv2d_layer, rand_tensor, pad_width, duplicate_rho_zero=dupl_rho_zero)
 
         # Rolled version (roll along the angular axis (the last one)
@@ -83,7 +83,7 @@ class Test_polar_conv:
         pad_width = (int(w_2d / 2 - 1) + 1)
         # Compare the usual evaluation against a rolled version (equivariant to rotations about the origin)
         # center_slice = np.s_[..., pad_width: -pad_width, pad_width: -pad_width]
-        dupl_rho_zero = True
+        dupl_rho_zero = False
         padded_tensor, _center_slice = polar_conv_padder(rand_tensor, w_2d, pad_width=None, duplicate_rho_zero=dupl_rho_zero)
 
         # Verify that the interior nodes match
@@ -104,6 +104,38 @@ class Test_polar_conv:
 
         print(f"Relative padding error: {padding_err:.3e}")
         assert padding_err < 1e-5
+
+    def test_polar_conv_padder_axis_consistency(self) -> None:
+        """Check that the polar_conv_padder works the same regardless of the axis ordering"""
+        # Set up the tensor
+        N_rho   = 40
+        N_theta = 80
+        num_channels_in  = 1
+        # num_channels_out = 1
+        rand_tensor = self.get_random_tensor((num_channels_in, N_rho, N_theta), rng_seed=29345)
+
+        # Set up the filter and conv2d layer
+        w_2d = 7
+        pad_width = (int(w_2d / 2 - 1) + 1)
+        dupl_rho_zero = True
+        print(f"rand_tensor.shape={rand_tensor.shape}")
+        padded_tensor_rho_theta = polar_conv_padder(
+            rand_tensor,
+            w_2d,
+            pad_width,
+            duplicate_rho_zero=dupl_rho_zero,
+            angular_axis_last=True,
+        )[0][0]
+        padded_tensor_theta_rho = polar_conv_padder(
+            rand_tensor.permute(0,2,1),
+            w_2d,
+            pad_width,
+            duplicate_rho_zero=dupl_rho_zero,
+            angular_axis_last=False,
+        )[0][0]
+        print(f"padded_tensor_theta_rho.shape={padded_tensor_theta_rho.shape}")
+        print(f"padded_tensor_rho_theta.shape={padded_tensor_rho_theta.shape}")
+        assert torch.all(padded_tensor_theta_rho.T == padded_tensor_rho_theta)
 
 
 class Test_conv_in_fourier_space:

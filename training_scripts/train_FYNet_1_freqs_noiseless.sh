@@ -30,7 +30,7 @@ python train_MFISNet_Fused.py \
     --n_cnn_channels_1d 24 \
     --n_cnn_channels_2d 24 \
     --kernel_size_1d 60 \
-    --kernel_size_2d 7 \
+    --kernel_size_2d 5 \
     --merge_middle_freq_channels true \
     --polar_padding true \
     --noise_to_signal_ratio 0 \
@@ -38,7 +38,7 @@ python train_MFISNet_Fused.py \
     --n_epochs_per_log 5 \
     --lr_init 1e-3 \
     --eta_min 1e-3 \
-    --weight_decay 1e-3 \
+    --weight_decay 0.0 \
     --batch_size 16 \
     --big_init \
     --debug \

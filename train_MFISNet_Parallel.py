@@ -85,6 +85,16 @@ def setup_args(argument_string: str = None) -> argparse.Namespace:
     parser.add_argument("-dont_write_outputs", default=False, action="store_true")
     parser.add_argument("-no_filtering_bool", default=False, action="store_true")
     parser.add_argument("-noise_to_signal_ratio", default=None, type=float)
+    parser.add_argument(
+        "-init_mode",
+        default="original",
+        choices=[
+            "original",
+            "uniform-with-old-scale",
+            "normal-with-old-scale",
+            "he-normal",
+        ],
+    )
 
     if argument_string is None:
         # Parse the arguments from the system's argv
@@ -284,6 +294,7 @@ def main(args: argparse.Namespace) -> None:
         N_cnn_1d=args.n_cnn_1d,
         N_cnn_2d=args.n_cnn_2d,
         N_freqs=len(args.wavenumbers),
+        init_mode=args.init_mode,
     )
 
     logging.info("Set up model: %s", model)
@@ -378,6 +389,7 @@ def main(args: argparse.Namespace) -> None:
                 "scobj_dir_val": args.scobj_dir_val,
                 "output_dir_train": args.output_dir_train,
                 "output_dir_val": args.output_dir_val,
+                "init_mode": args.init_mode,
             }
             for k, v in train_loss_dd.items():
                 train_dd["train_" + k] = torch.mean(v).item()
@@ -396,6 +408,7 @@ def main(args: argparse.Namespace) -> None:
         torch.save(model_0.state_dict(), fp_weights)
         model_0 = model_0.to(device)
 
+    t0 = default_timer()
     model = train(
         model=model,
         n_epochs=args.n_epochs,
@@ -409,6 +422,9 @@ def main(args: argparse.Namespace) -> None:
         log_function=log_function,
         loss_function=loss_module_0,
     )
+
+    t1 = default_timer()
+    logging.info("Complete model training time is %f sec", t1 - t0)
 
     if not args.dont_write_outputs:
         #######################################################################

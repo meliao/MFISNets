@@ -28,6 +28,7 @@ from src.utils.conv_ops import (
     apply_conv_with_polar_padding,
 )
 
+
 class MFISNet_Fused(torch.nn.Module):
     def __init__(
         self,
@@ -41,8 +42,9 @@ class MFISNet_Fused(torch.nn.Module):
         N_cnn_1d: int,
         N_cnn_2d: int,
         merge_middle_freq_channels: bool,
-        big_init: bool=True,
+        big_init: bool = True,
         polar_padding: bool = False,
+        init_mode: str = None,
     ) -> None:
         """
         Baseline comparison for a multi-frequency approach using similar network architecture.
@@ -80,9 +82,13 @@ class MFISNet_Fused(torch.nn.Module):
         self.big_init = big_init
         self.forward_network_bool = False
         self.polar_padding = polar_padding
-        logging.info(f"Wide Input FYNet Inverse received: polar_padding={polar_padding}")
+        init_mode = init_mode.lower() if init_mode is not None else "original"
+        self.init_mode = init_mode
+
+        logging.info(f"MFISNet-Fused received: polar_padding={polar_padding}")
 
         self.weight_dtype = torch.complex64
+        self.real_dtype = torch.float32
         assert (
             self.w_2d % 2
         ), "I can't figure out how to do padding for kernel sizes divisible by 2"
@@ -90,23 +96,23 @@ class MFISNet_Fused(torch.nn.Module):
         padding_1d = int(self.w_1d / 2 - 1) + 1
         padding_2d = int(self.w_2d / 2 - 1) + 1
 
-        c_1d_in  = self.N_freqs * (self.N_h * 2)
-        c_1d_int = self.N_freqs * self.c_1d # internal layers
+        c_1d_in = self.N_freqs * (self.N_h * 2)
+        c_1d_int = self.N_freqs * self.c_1d  # internal layers
         c_1d_out = self.N_rho
-        c_2d_in  = 1
+        c_2d_in = 1
         c_2d_int = self.c_2d
         c_2d_out = 1
 
         if not merge_middle_freq_channels:
             c_1d_out *= N_freqs
-            c_2d_in  *= N_freqs
+            c_2d_in *= N_freqs
             # c_2d_int *= N_freqs
 
         # Save parameter values for later reference
-        self.c_1d_in  = c_1d_in
+        self.c_1d_in = c_1d_in
         self.c_1d_int = c_1d_int
         self.c_1d_out = c_1d_out
-        self.c_2d_in  = c_2d_in
+        self.c_2d_in = c_2d_in
         self.c_2d_int = c_2d_int
         self.c_2d_out = c_2d_out
 
@@ -115,55 +121,78 @@ class MFISNet_Fused(torch.nn.Module):
         # First layer
         # Dimensions along the freq/h axis
         cnn1d_freq_h_axis_dims = [
-            c_1d_in, # Input
-            *((self.N_cnn_1d-1)*[c_1d_int]), # Interior
+            c_1d_in,  # Input
+            *((self.N_cnn_1d - 1) * [c_1d_int]),  # Interior
             c_1d_out,  # Final layer of 1D section
         ]
-        logging.info(f"During the 1D Conv stage, freq/h axis has {cnn1d_freq_h_axis_dims} channels")
+        logging.info(
+            f"During the 1D Conv stage, freq/h axis has {cnn1d_freq_h_axis_dims} channels"
+        )
 
         self.conv_1d_layers = torch.nn.ParameterList([])
         for li in range(self.N_cnn_1d):
-            h_dim_in    = cnn1d_freq_h_axis_dims[li]
-            h_dim_out   = cnn1d_freq_h_axis_dims[li+1]
-            scale_big   = 2 / h_dim_in
-            scale_small = 1 / (h_dim_in * h_dim_out)
-            scaling = scale_big if big_init else scale_small
+            h_dim_in = cnn1d_freq_h_axis_dims[li]
+            h_dim_out = cnn1d_freq_h_axis_dims[li + 1]
+            scale_old = 2 / h_dim_in
+            scale_he = torch.sqrt(torch.tensor(2 / h_dim_in, dtype=self.real_dtype))
 
-            new_params = scaling * torch.rand(
-                h_dim_out,
-                h_dim_in,
-                self.w_1d,
-                dtype=self.weight_dtype
+            if init_mode == "original":
+                scaling = scale_old
+                rand_fn = torch.rand
+            elif init_mode == "uniform-with-old-scale":
+                scaling = scale_old
+                rand_fn = lambda x: 2 * torch.rand(x) - 1
+            elif init_mode == "normal-with-old-scale":
+                scaling = scale_old
+                rand_fn = torch.randn
+            elif init_mode == "he-normal":
+                rand_fn = torch.randn
+                scaling = scale_he
+            else:
+                raise ValueError(
+                    f"MFISNet_Fused.__init__ received init_mode={init_mode} "
+                    f"which is not in the recognized list of options: [original, "
+                    f"uniform-with-old-scale, normal-with-old-scale, he-normal]",
+                )
+            new_params = scaling * rand_fn(
+                h_dim_out, h_dim_in, self.w_1d, dtype=self.weight_dtype
             )
+
             self.conv_1d_layers.append(new_params)
 
         ## 2D CNN
         # 2D Conv over (rho, theta) but use frequencies as channels
         # Dimensions along the h axis
         cnn2d_freq_h_axis_dims = [
-            c_2d_in, # Input
-            *((self.N_cnn_2d-1)*[c_2d_int]), # Interior
-            c_2d_out, # Final layer
+            c_2d_in,  # Input
+            *((self.N_cnn_2d - 1) * [c_2d_int]),  # Interior
+            c_2d_out,  # Final layer
         ]
-        logging.info(f"During the 2D Conv stage, freq/h axis has {cnn2d_freq_h_axis_dims} channels")
+        logging.info(
+            f"During the 2D Conv stage, freq/h axis has {cnn2d_freq_h_axis_dims} channels"
+        )
         self.conv_2d_layers = torch.nn.ParameterList([])
         for li in range(self.N_cnn_2d):
-            freq_dim_in  = cnn2d_freq_h_axis_dims[li]
-            freq_dim_out = cnn2d_freq_h_axis_dims[li+1]
+            freq_dim_in = cnn2d_freq_h_axis_dims[li]
+            freq_dim_out = cnn2d_freq_h_axis_dims[li + 1]
 
             new_layer = torch.nn.Conv2d(
                 in_channels=freq_dim_in,
                 out_channels=freq_dim_out,
                 kernel_size=self.w_2d,
                 padding=padding_2d,
-                padding_mode="circular" # leave this way for now :(
+                padding_mode="zeros",
             )
+            if init_mode == "he-normal":
+                torch.nn.init.kaiming_normal_(new_layer.weight, nonlinearity="relu")
             self.conv_2d_layers.append(new_layer)
 
         param_shapes = [p.shape for p in self.parameters()]
         param_numels = [p.numel() for p in self.parameters()]
-        logging.info(f"WideInputFYNetInverse contains parameters with sizes {param_shapes} "
-                     f"for a total of {sum(param_numels)} parameters")
+        logging.info(
+            f"MFISNet-Fused contains parameters with sizes {param_shapes} "
+            f"for a total of {sum(param_numels)} parameters"
+        )
 
         self.relu = torch.nn.ReLU()
 
@@ -193,9 +222,9 @@ class MFISNet_Fused(torch.nn.Module):
         N_h = x.shape[-2]
         N_freqs = self.N_freqs
 
-        x = x.reshape((N_batch, N_freqs, N_m, 2*N_h))
-        x = x.permute((0, 1, 3, 2)) # Send to (N_batch, N_freqs, 2*N_h, N_m)
-        x = x.reshape((N_batch, N_freqs * 2*N_h, N_m))
+        x = x.reshape((N_batch, N_freqs, N_m, 2 * N_h))
+        x = x.permute((0, 1, 3, 2))  # Send to (N_batch, N_freqs, 2*N_h, N_m)
+        x = x.reshape((N_batch, N_freqs * 2 * N_h, N_m))
 
         # First, 1D convolution across the N_M dimension.
         for kernel_weights in self.conv_1d_layers:
@@ -206,10 +235,12 @@ class MFISNet_Fused(torch.nn.Module):
 
         x = x.view((N_batch, -1, self.N_rho, N_m))
 
-        # 2D convolutions in the (N_M, N_H) plane
+        # 2D convolutions in the (N_rho, N_theta) plane (with N_m=N_theta for simplicity)
         for i, conv_2d_layer in enumerate(self.conv_2d_layers):
             if self.polar_padding:
-                x = apply_conv_with_polar_padding(conv_2d_layer, x)
+                x = apply_conv_with_polar_padding(
+                    conv_2d_layer, x, angular_axis_last=True
+                )
             else:
                 x = conv_2d_layer(x)
             if i == self.N_cnn_2d - 1:
@@ -219,14 +250,15 @@ class MFISNet_Fused(torch.nn.Module):
                 x = self.relu(x)
 
         out = x.view((N_batch, -1, N_m))
-        out = out.permute((0, 2, 1)) # (N_batch, N_theta, N_rho)
+        out = out.permute((0, 2, 1))  # (N_batch, N_theta, N_rho)
         return out
 
     def __repr__(self) -> str:
-        s = f"FYNetInverse model with {self.N_cnn_1d} 1D CNN layers, {self.N_cnn_2d} 2D CNN layers"
+        s = f"MFISNet_Fused model with {self.N_cnn_1d} 1D CNN layers, {self.N_cnn_2d} 2D CNN layers"
         s += f" 1D channel dim {self.c_1d}, 2D channel dim {self.c_2d}. 1D Convs performed with"
         s += f" {self.w_1d} modes, and 2D conv is performed with kernels of size ({self.w_2d}x{self.w_2d})."
         return s
+
 
 def load_MFISNet_Fused_from_state_dict(
     state_dict: dict,
@@ -238,29 +270,35 @@ def load_MFISNet_Fused_from_state_dict(
     Also currently seems to require the polar padding
     """
     # First, compute hyperparameters from the state dictionary
-    layer_dims = {key:tuple(val.shape) for (key, val) in state_dict.items()}
+    layer_dims = {key: tuple(val.shape) for (key, val) in state_dict.items()}
     parameter_keys = list(state_dict.keys())
 
     N_cnn_1d = sum("conv_1d_layers" in key for key in parameter_keys)
-    N_cnn_2d = sum(("conv_2d_layers" in key) and ("weight" in key) for key in parameter_keys)
+    N_cnn_2d = sum(
+        ("conv_2d_layers" in key) and ("weight" in key) for key in parameter_keys
+    )
 
     (c_1d_int, c_1d_in, w_1d) = layer_dims["conv_1d_layers.0"]
-    (c_1d_out, _c_1d_int, _w_1d) = layer_dims[f"conv_1d_layers.{N_cnn_1d-1}"] # last conv1d layer
+    (c_1d_out, _c_1d_int, _w_1d) = layer_dims[
+        f"conv_1d_layers.{N_cnn_1d-1}"
+    ]  # last conv1d layer
 
     (c_2d_int, c_2d_in, w_2d, _) = layer_dims["conv_2d_layers.0.weight"]
     (c_2d_out, c_2d_int, _, _) = layer_dims[f"conv_2d_layers.{N_cnn_1d-1}.weight"]
 
-    N_h  = c_1d_in // (2 * N_freqs)
+    N_h = c_1d_in // (2 * N_freqs)
     c_1d = c_1d_int // N_freqs
     c_2d = c_2d_int
-    merge_middle_freq_channels = (c_2d_in < N_freqs) # merge operation would reduce channel count from N_freqs
+    merge_middle_freq_channels = (
+        c_2d_in < N_freqs
+    )  # merge operation would reduce channel count from N_freqs
     if merge_middle_freq_channels:
         N_rho = c_1d_out
     else:
         N_rho = c_1d_out // N_freqs
 
     # Next, initialize a model
-    new_win_mffy_model = MFISNet_Fused(
+    new_mfisnet_fused_model = MFISNet_Fused(
         N_h=N_h,
         N_rho=N_rho,
         N_freqs=N_freqs,
@@ -271,10 +309,10 @@ def load_MFISNet_Fused_from_state_dict(
         N_cnn_1d=N_cnn_1d,
         N_cnn_2d=N_cnn_2d,
         merge_middle_freq_channels=merge_middle_freq_channels,
-        big_init=True, # just use this as a default value but it doesn't really matter,
+        big_init=True,  # just use this as a default value but it doesn't really matter,
         polar_padding=polar_padding,
     )
 
     # Load in the values
-    new_win_mffy_model.load_state_dict(state_dict=state_dict)
-    return new_win_mffy_model
+    new_mfisnet_fused_model.load_state_dict(state_dict=state_dict)
+    return new_mfisnet_fused_model

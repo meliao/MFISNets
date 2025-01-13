@@ -14,21 +14,39 @@ Our main architecture is MFISNet-Refinement, which is defined by an initial neur
 Each refinement block is a simple update to a previously-published architecture, FYNet (based on Fan and Ying 2022, "Solving Inverse Wave Scattering with Deep Learning"), which is designed for the single-frequency inverse scattering problem:
 ![image](.github/assets/refinementblock_architecture.png)
 
+
+## Citation
+<!-- Interpreting scattered acoustic and electromagnetic wave patterns is a computational task that enables remote imaging in a number of important applications, including medical imaging, geophysical exploration, sonar and radar detection, and nondestructive testing of materials. However, accurately and stably recovering an inhomogeneous medium from far-field scattered wave measurements is a computationally difficult problem, due to the nonlinear and non-local nature of the forward scattering process. We design a neural network, called Multi-Frequency Inverse Scattering Network (MFISNet), and a training method to approximate the inverse map from far-field scattered wave measurements at multiple frequencies. We consider three variants of MFISNet, with the strongest performing variant inspired by the recursive linearization method -- a commonly used technique for stably inverting scattered wavefield data -- that progressively refines the estimate with higher frequency content.  -->
+
+If this code is useful to your research, please cite our preprint:
+```
+@misc{melia2024mfisnet,
+      title={Multi-Frequency Progressive Refinement for Learned Inverse Scattering}, 
+      author={Owen Melia and Olivia Tsang and Vasileios Charisopoulos and Yuehaw Khoo and Jeremy Hoskins and Rebecca Willett},
+      year={2024},
+      eprint={2405.13214},
+      archivePrefix={arXiv},
+      primaryClass={physics.comp-ph},
+      url={https://arxiv.org/abs/2405.13214}, 
+}
+```
+This work was also presented as a poster at the AI for Science workshop at ICML 2024 and the Institute for Mathematical and Statistical Innovation's (IMSI) Computational Imaging Workshop.
+
+
 ## Environment Setup
 
 We provide a description of the environment used for our experiments in `env.yaml`. To use Anaconda to install this environment, you can run:
 ```
-conda env create --name mfisnets --file env.yaml
+conda create --name mfisnets python=3.10 --file env.yaml
 conda activate mfisnets
 ```
 
-We performed testing with the following package version numbers:
+We performed testing with Python 3.10 and used the following package version numbers:
 - jupyter: 1.0.0
 - pandas: 2.0.3
 - numpy: 1.26.0
-- scipy: 1.11.3
+- scipy: 1.14
 - h5py: 3.9.0
-- numba: 0.57.1
 - matplotlib: 3.7.2
 - pytest: 7.4.0
 - pytorch: 2.1.0 (with pytorch-cuda version 11.8)
@@ -36,7 +54,6 @@ We performed testing with the following package version numbers:
 
 Through pip:
 - wandb=0.15.12
-- cola-ml=0.0.4
 
 To test that the environment is properly set up, you can run the test suite via:
 ```
@@ -70,11 +87,19 @@ data/
 In the data generation code, we often specify the incident wave by its non-angular wavenumber `nu`. A wave with angular wavenumber `k` has non-angular wavenumber `nu = k / (2 * pi)`. `nu` indicates the number of wavelengths that fit in each unit length.
 
 
-## Dataset
+## Dataset Download
 
-We make the dataset publicly available [at this link](https://uchicago.box.com/s/3fwaiqnhzjzr7y199ezvzxyzsif5jzv6).
 
-Our dataset has the following file structure, and the file reading/writing utilities are written assuming this structure. 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14514353.svg)](https://doi.org/10.5281/zenodo.14514353)
+
+We make the dataset publicly available [via Zenodo](https://doi.org/10.5281/zenodo.14514353).
+
+After downloading and decompressing the dataset, please run the following python utility to separate the files into directories containing scattering objects, and ones containing measurements of the forward model. This can be done with the command:
+```
+python expand_dataset_from_zenodo.py -data_dir data/dataset
+```
+
+After the script finishes, the dataset directory should have the following structure.
 
 ```
 data/
@@ -121,20 +146,3 @@ The measurement files are saved in hdf5 format, with all of the fields in the sc
  * `m_vals`: Coordinates of the (m, h) transformed data.
  * `h_vals`: Coordinates of the (m, h) transformed data.
  
-
-## Citation
-
-If this code is useful to your research, please cite our preprint:
-```
-@misc{melia2024mfisnet,
-      title={Multi-Frequency Progressive Refinement for Learned Inverse Scattering}, 
-      author={Owen Melia and Olivia Tsang and Vasileios Charisopoulos and Yuehaw Khoo and Jeremy Hoskins and Rebecca Willett},
-      year={2024},
-      eprint={2405.13214},
-      archivePrefix={arXiv},
-      primaryClass={physics.comp-ph},
-      url={https://arxiv.org/abs/2405.13214}, 
-}
-```
-
-This work was also presented as a poster at the AI for Science workshop at ICML 2024 and the Institute for Mathematical and Statistical Innovation's (IMSI) Computational Imaging Workshop.

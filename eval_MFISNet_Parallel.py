@@ -76,6 +76,14 @@ def setup_args() -> argparse.Namespace:
         type=float,
         help="Noise-to-signal ratio for input test data",
     )
+
+    parser.add_argument(
+        "--manual_batch_size",
+        default=None,
+        type=int,
+        help="Set a batch size for inference if desired. Defaults to batch size present in the hyperparam summary file, and then falls back to 32.",
+    )
+
     a = parser.parse_args()
     return a
 
@@ -94,14 +102,16 @@ def main(args: argparse.Namespace) -> None:
     if not os.path.isdir(args.test_output_predictions_dir):
         os.mkdir(args.test_output_predictions_dir)
 
-    if args.hyperparam_summary_fp is not None:
+    if args.manual_batch_size is not None:
+        batch_size = args.manual_batch_size
+    elif args.hyperparam_summary_fp is not None:
         # Load hyperparameter summary:
         with open(args.hyperparam_summary_fp, "r") as hsf:
             hyperparam_sd = yaml.load(hsf, Loader=yaml.Loader)
         # hyperparam_sd = yaml.load(args.hyperparam_summary_fp, Loader=yaml.Loader)
         logging.debug(f"hp_sd: {hyperparam_sd.keys()}")
         hps_log_info = hyperparam_sd["log_info"]
-        logging.debug(f"hps log info: {hps_log_info}", flush=True)
+        logging.debug(f"hps log info: {hps_log_info}")
         batch_size = hps_log_info["batch_size"]
     else:
         batch_size = 32

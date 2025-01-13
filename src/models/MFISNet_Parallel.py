@@ -25,6 +25,7 @@ class MFISNet_Parallel(torch.nn.Module):
         N_cnn_1d: int,
         N_cnn_2d: int,
         N_freqs: int,
+        init_mode: str = None,
     ) -> None:
         """The inverse NN described in section 2 of FY19. NN inputs have shape
         (batch, N_M, N_H, 2) and outputs have shape (batch, N_theta, N_rho),
@@ -55,8 +56,13 @@ class MFISNet_Parallel(torch.nn.Module):
         self.N_cnn_2d = N_cnn_2d
         self.N_freqs = N_freqs
 
+        init_mode = init_mode.lower() if init_mode is not None else "original"
+        self.init_mode = init_mode
+
         # Set up neural networks parameters
         self.weight_dtype = torch.complex64
+        self.real_dtype = torch.float32
+        weight_dtype = self.weight_dtype
         assert (
             self.w_2d % 2
         ), f"I can't figure out how to do padding for kernel sizes divisible by 2, {self.w_2d}"
@@ -64,92 +70,158 @@ class MFISNet_Parallel(torch.nn.Module):
         padding_1d = int(self.w_1d / 2 - 1) + 1
         padding_2d = int(self.w_2d / 2 - 1) + 1
 
+        def conv1d_init_helper(dim_in, dim_out, w_1d=self.w_1d, **kwargs):
+            nonlocal init_mode, weight_dtype
+            scale_old = 2 / dim_in
+            scale_he  = torch.sqrt(torch.tensor(2 / dim_in, dtype=self.real_dtype))
+
+            if init_mode == "original":
+                scaling = scale_old
+                rand_fn = torch.rand
+            elif init_mode == "uniform-with-old-scale":
+                scaling = scale_old
+                rand_fn = lambda x: 2*torch.rand(x)-1
+            elif init_mode == "normal-with-old-scale":
+                scaling = scale_old
+                rand_fn = torch.randn
+            elif init_mode == "he-normal":
+                rand_fn  = torch.randn
+                scaling  = scale_he
+            else:
+                raise ValueError(
+                    f"MFISNet_Parallel.__init__ received init_mode={init_mode} "
+                    f"which is not in the recognized list of options: [original, "
+                    f"uniform-with-old-scale, normal-with-old-scale, he-normal]",
+                )
+            new_params = scaling * rand_fn(
+                dim_out,
+                dim_in,
+                w_1d,
+                dtype=weight_dtype,
+                **kwargs
+            )
+            return new_params
+
+
         # 1. Initialize conv 1d parameters in a ParameterList saved at self.conv_1d_layers.
         # This list contains all of the parameters for all of the 1D conv heads, cycling
         # through the heads. So it will be <N_freqs> copies of the first layer, then
         # <N_freqs> copies of the second layer, and so on.
         in_channels_0 = self.N_h * 2
-        scale_0 = 2 / in_channels_0  # new
+        # scale_0 = 2 / in_channels_0  # new
 
         self.conv_1d_layers = torch.nn.ParameterList([])
         for _ in range(self.N_freqs):
+            # params_0 = torch.nn.Parameter(
+            #     scale_0
+            #     * torch.rand(
+            #         self.c_1d, in_channels_0, self.w_1d, dtype=self.weight_dtype
+            #     )
+            # )
             params_0 = torch.nn.Parameter(
-                scale_0
-                * torch.rand(
-                    self.c_1d, in_channels_0, self.w_1d, dtype=self.weight_dtype
-                )
+                conv1d_init_helper(in_channels_0, self.c_1d)
             )
             self.conv_1d_layers.append(params_0)
 
         # Range over the conv layers that are not the first or last layers.
         for _ in range(self.N_cnn_1d - 2):
-            scale_i = 2 / self.c_1d
+            # scale_i = 2 / self.c_1d
 
             # Range over the different frequency heads.
             for _ in range(self.N_freqs):
                 params_i = torch.nn.Parameter(
-                    scale_i
-                    * torch.rand(
-                        self.c_1d, self.c_1d, self.w_1d, dtype=self.weight_dtype
-                    )
+                    conv1d_init_helper(self.c_1d, self.c_1d)
+                    # scale_i
+                    # * torch.rand(
+                    #     self.c_1d, self.c_1d, self.w_1d, dtype=self.weight_dtype
+                    # )
                 )
                 self.conv_1d_layers.append(params_i)
 
-        scale_last = 2 / self.c_1d
+        # scale_last = 2 / self.c_1d
 
         for _ in range(self.N_freqs):
             params_last = torch.nn.Parameter(
-                scale_last
-                * torch.rand(self.N_rho, self.c_1d, self.w_1d, dtype=self.weight_dtype)
+                conv1d_init_helper(self.c_1d, self.N_rho)
+                # scale_last
+                # * torch.rand(self.N_rho, self.c_1d, self.w_1d, dtype=self.weight_dtype)
             )
             self.conv_1d_layers.append(params_last)
 
         # 2. Initialize conv 2d parameters
-        if self.N_cnn_2d > 1:
-            self.conv_2d_layers = torch.nn.ParameterList(
-                [
-                    torch.nn.Conv2d(
-                        in_channels=self.N_freqs,
-                        out_channels=self.c_2d,
-                        kernel_size=self.w_2d,
-                        padding=padding_2d,
-                        padding_mode="circular",
-                    )
-                ]
-            )
+        # if self.N_cnn_2d > 1:
+        #     self.conv_2d_layers = torch.nn.ParameterList(
+        #         [
+        #             torch.nn.Conv2d(
+        #                 in_channels=self.N_freqs,
+        #                 out_channels=self.c_2d,
+        #                 kernel_size=self.w_2d,
+        #                 padding=padding_2d,
+        #                 padding_mode="zeros",
+        #             )
+        #         ]
+        #     )
 
-            for _ in range(self.N_cnn_2d - 2):
-                self.conv_2d_layers.append(
-                    torch.nn.Conv2d(
-                        in_channels=self.c_2d,
-                        out_channels=self.c_2d,
-                        kernel_size=self.w_2d,
-                        padding=padding_2d,
-                        padding_mode="circular",
-                    )
-                )
-            # Append the last layer that outputs N_rho channels
-            self.conv_2d_layers.append(
-                torch.nn.Conv2d(
-                    in_channels=self.c_2d,
-                    out_channels=1,
-                    kernel_size=self.w_2d,
-                    padding=padding_2d,
-                    padding_mode="circular",
-                )
+        #     for _ in range(self.N_cnn_2d - 2):
+        #         self.conv_2d_layers.append(
+        #             torch.nn.Conv2d(
+        #                 in_channels=self.c_2d,
+        #                 out_channels=self.c_2d,
+        #                 kernel_size=self.w_2d,
+        #                 padding=padding_2d,
+        #                 padding_mode="zeros",
+        #             )
+        #         )
+        #     # Append the last layer that outputs N_rho channels
+        #     self.conv_2d_layers.append(
+        #         torch.nn.Conv2d(
+        #             in_channels=self.c_2d,
+        #             out_channels=1,
+        #             kernel_size=self.w_2d,
+        #             padding=padding_2d,
+        #             padding_mode="zeros",
+        #         )
+        #     )
+        # else:
+        #     self.conv_2d_layers = torch.nn.ParameterList(
+        #         [
+        #             torch.nn.Conv2d(
+        #                 in_channels=1, # is this right? should this be self.N_freqs?
+        #                 out_channels=1,
+        #                 kernel_size=self.w_2d,
+        #                 padding=padding_2d,
+        #                 padding_mode="zeros",
+        #             )
+        #         ]
+        #     )
+
+        # # Adjust the initialization if he-normal is specified
+        # if init_mode == "he-normal":
+        #     for conv_2d_layer in self.conv_2d_layers:
+        #         torch.nn.init.kaiming_normal_(conv_2d_layer.weight, nonlinearity="relu")
+
+        # Streamlined version of the setup process
+        cnn2d_freq_h_axis_dims = [
+            self.N_freqs,
+            *((self.N_cnn_2d-1)*[self.c_2d]),
+            1,
+        ]
+        self.conv_2d_layers = torch.nn.ParameterList([])
+        for li in range(self.N_cnn_2d):
+            dim_in  = cnn2d_freq_h_axis_dims[li]
+            dim_out = cnn2d_freq_h_axis_dims[li+1]
+
+            new_layer = torch.nn.Conv2d(
+                in_channels=dim_in,
+                out_channels=dim_out,
+                kernel_size=self.w_2d,
+                padding=padding_2d,
+                padding_mode="zeros",
             )
-        else:
-            self.conv_2d_layers = torch.nn.ParameterList(
-                [
-                    torch.nn.Conv2d(
-                        in_channels=1,
-                        out_channels=1,
-                        kernel_size=self.w_2d,
-                        padding=padding_2d,
-                        padding_mode="circular",
-                    )
-                ]
-            )
+            if init_mode == "he-normal":
+                torch.nn.init.kaiming_normal_(new_layer.weight, nonlinearity="relu")
+            self.conv_2d_layers.append(new_layer)
+
 
         self.relu = torch.nn.ReLU()
 
@@ -192,16 +264,25 @@ class MFISNet_Parallel(torch.nn.Module):
         x_lst_unsqueezed = [z.unsqueeze(1) for z in x_lst]
         x = torch.cat(x_lst_unsqueezed, dim=1)
 
-        for i in range(self.N_cnn_2d - 1):
-            layer = self.conv_2d_layers[i]
-            x = apply_conv_with_polar_padding(layer, x)
-            x = self.relu(x)
 
-        last_layer = self.conv_2d_layers[-1]
-        x = apply_conv_with_polar_padding(last_layer, x)
+        # 2D convolutions in the (N_rho, N_theta) plane (with N_m=N_theta for simplicity)
+        for i, conv_2d_layer in enumerate(self.conv_2d_layers):
+            x = apply_conv_with_polar_padding(conv_2d_layer, x, angular_axis_last=True)
+            if i == self.N_cnn_2d - 1:
+                # Skip the last relu
+                break
+            else:
+                x = self.relu(x)
+
+        # for i in range(self.N_cnn_2d - 1):
+        #     layer = self.conv_2d_layers[i]
+        #     x = apply_conv_with_polar_padding(layer, x)
+        #     x = self.relu(x)
+        # last_layer = self.conv_2d_layers[-1]
+        # x = apply_conv_with_polar_padding(last_layer, x)
 
         out_polar = x.view((n_batch, -1, n_M))
-        out_polar = out_polar.permute((0, 2, 1))
+        out_polar = out_polar.permute((0, 2, 1)) # Send to (N_batch, N_theta, N_rho)
         result = out_polar
 
         return result

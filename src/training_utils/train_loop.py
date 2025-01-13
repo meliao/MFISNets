@@ -5,6 +5,34 @@ import torch
 import numpy as np
 
 
+class EarlyStopper:
+    """
+    From StackOverflow: https://stackoverflow.com/questions/71998978/early-stopping-in-pytorch
+    """
+
+    def __init__(self, patience: int = 3, min_delta: float = 1e-03):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = np.inf
+
+    def early_stop(self, validation_loss):
+        if validation_loss < (self.min_validation_loss - self.min_delta):
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            logging.info(
+                "EarlyStopper: Valdation loss did not decrease. counter= %i / %i",
+                self.counter,
+                self.patience,
+            )
+            if self.counter >= self.patience:
+                self.counter = 0
+                return True
+        return False
+
+
 def train(
     model: torch.nn.Module,
     n_epochs: int,
@@ -56,6 +84,7 @@ def train(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=n_epochs, eta_min=eta_min
     )
+
     # logging.info("Beginning model training for %i epochs", n_epochs)
 
     # loss_fn_name = (
@@ -110,7 +139,9 @@ def train(
 
         if epoch % n_epochs_per_log == 0:
             if log_function is not None:
-                log_function(model, epoch)
+                early_stopping_bool = log_function(model, epoch)
+                if early_stopping_bool is not None and early_stopping_bool:
+                    break
             else:
                 epoch_mse_polar = running_sum_squared_error_polar / len(
                     train_loader.dataset

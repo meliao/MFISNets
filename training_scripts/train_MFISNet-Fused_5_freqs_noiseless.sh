@@ -36,9 +36,9 @@ python train_MFISNet_Fused.py \
     --noise_to_signal_ratio 0 \
     --n_epochs 100 \
     --n_epochs_per_log 5 \
-    --lr_init 5e-4 \
-    --eta_min 5e-4 \
-    --weight_decay 0 \
+    --lr_init 1e-03 \
+    --eta_min 1e-03 \
+    --weight_decay 0.0 \
     --batch_size 16 \
     --big_init \
     --debug \

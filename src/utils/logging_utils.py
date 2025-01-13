@@ -125,6 +125,7 @@ def find_best_epoch(
     Return Value:
         (Dict): the key-value mapping of the best epoch's contents
     """
+    logging.debug("find_best_epoch: results_fp=%s", results_fp)
     line_entry, val_error = extract_line_by_field(
         results_fp, val_error_field, selection_mode=selection_mode
     )

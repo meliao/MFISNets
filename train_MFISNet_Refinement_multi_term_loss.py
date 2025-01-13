@@ -41,7 +41,11 @@ from src.data.data_io import load_dir
 from src.models.MFISNet_Refinement import (
     MFISNet_Refinement,
 )
-from src.training_utils.train_loop import train, evaluate_losses_on_dataloader
+from src.training_utils.train_loop import (
+    train,
+    evaluate_losses_on_dataloader,
+    EarlyStopper,
+)
 from src.training_utils.loss_functions import MultiTermLossFunction
 from src.training_utils.make_predictions import make_preds_on_dataset
 from src.utils.logging_utils import FMT, TIMEFMT, write_result_to_file, hash_dict
@@ -91,6 +95,17 @@ def setup_args() -> argparse.Namespace:
         default=1.0,
         help="Values > 1 make the later freqs more important",
     )
+    parser.add_argument(
+        "-init_mode",
+        default="original",
+        choices=[
+            "original",
+            "uniform-with-old-scale",
+            "normal-with-old-scale",
+            "he-normal",
+        ],
+    )
+    parser.add_argument("-early_stopping", default=False, action="store_true")
 
     a = parser.parse_args()
 
@@ -348,6 +363,7 @@ def main(args: argparse.Namespace) -> None:
         N_cnn_1d=args.n_cnn_1d,
         N_cnn_2d=args.n_cnn_2d,
         N_freqs=len(args.wavenumbers),
+        init_mode=args.init_mode,
         return_all_q_hats=True,
     )
 
@@ -437,6 +453,7 @@ def main(args: argparse.Namespace) -> None:
                 "scobj_dir_val": args.scobj_dir_val,
                 "output_dir_train": args.output_dir_train,
                 "output_dir_val": args.output_dir_val,
+                "init_mode": args.init_mode,
             }
             for k, v in train_loss_dd.items():
                 train_dd["train_" + k] = torch.mean(v).item()
@@ -454,9 +471,13 @@ def main(args: argparse.Namespace) -> None:
         fp_weights = os.path.join(args.model_weights_dir, f"epoch_{epoch_eff}.pickle")
         torch.save(model_0.state_dict(), fp_weights)
         model_0 = model_0.to(device)
+        if args.early_stopping:
+            return early_stopper.early_stop(train_dd["val_rel_l2"])
+        else:
+            return False
 
     ##########################################################################################
-    # PRETRAIN EACH BLOCK
+    # TRAIN THE MODEL
     loss_module = MultiTermLossFunction(
         pred_idx=N_freqs - 1, scale_factor=args.loss_scale_factor
     )
@@ -474,6 +495,10 @@ def main(args: argparse.Namespace) -> None:
     training_part = "fine-tune"
     epoch_stagger = 0
     n_epochs_this_step = args.n_epochs
+
+    if args.early_stopping:
+        early_stopper = EarlyStopper()
+
     model = train(
         model=model,
         n_epochs=args.n_epochs,

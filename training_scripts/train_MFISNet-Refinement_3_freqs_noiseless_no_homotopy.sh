@@ -26,14 +26,14 @@ python train_MFISNet_Refinement_multi_term_loss.py \
 -results_fp $RESULTS_FP \
 -n_epochs 100 \
 -n_epochs_per_log 5 \
--lr_init 1e-03 \
--loss_scale_factor 1.1 \
--eta_min 1e-03 \
+-lr_init 5e-04 \
+-loss_scale_factor 1.0 \
+-eta_min 5e-04 \
 -n_cnn_channels_1d 24 \
 -n_cnn_channels_2d 24 \
 -n_cnn_1d 3 \
 -n_cnn_2d 3 \
--kernel_size_1d 40 \
+-kernel_size_1d 20 \
 -kernel_size_2d 7 \
 -dont_use_wandb \
 -weight_decay 1e-03 \

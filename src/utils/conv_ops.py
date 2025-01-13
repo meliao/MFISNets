@@ -6,7 +6,7 @@
 
 import torch
 import numpy as np
-
+from typing import Tuple
 
 def conv_in_fourier_space(signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
     """Perform a 1d convolution in Fourier space (along the last axis).
@@ -50,7 +50,8 @@ def apply_conv_with_polar_padding(
     conv2d_layer: torch.nn.Module,
     input_tensor: torch.Tensor,
     pad_width: int = None,
-    duplicate_rho_zero: bool = True,
+    duplicate_rho_zero: bool = False,
+    angular_axis_last: bool = True,
 ) -> torch.Tensor:
     """
     Helper function that applies the conv2d operation on a polar grid
@@ -65,7 +66,9 @@ def apply_conv_with_polar_padding(
 
     # 1-3. Perform the padding for the polar grid
     padded_tensor, center_slice = polar_conv_padder(
-        input_tensor, w_2d, pad_width, duplicate_rho_zero=duplicate_rho_zero
+        input_tensor, w_2d, pad_width,
+        duplicate_rho_zero=duplicate_rho_zero,
+        angular_axis_last=angular_axis_last,
     )
 
     # 4. Run the actual convolution layer then crop out the padding
@@ -74,12 +77,14 @@ def apply_conv_with_polar_padding(
     return output_tensor
 
 
+
 def polar_conv_padder(
     input_tensor: torch.Tensor,
     w_2d: int,
     pad_width: int = None,
-    duplicate_rho_zero: bool = True,
-) -> torch.Tensor:
+    duplicate_rho_zero: bool = False,
+    angular_axis_last: bool = True,
+) -> Tuple[torch.Tensor, slice]:
     """Helper function that performs the padding to reflect the proper boundary conditions for Conv2D on a polar grid
 
     Assumes the radial and angular axes are the second-to-last and last axes, respectively
@@ -88,19 +93,27 @@ def polar_conv_padder(
     Args:
         input_tensor (torch Tensor): un-padded tensor in polar coordinates to be padded.
             This tensor is expected to have shape (..., N_rho, N_theta)
+            (or if it has shape (..., N_theta, N_rho) then pass angular_axis_last=False)
         w_2d (int): width of the (square) 2d kernel
         pad_width (int): how much to pad on each side of both the radial and angular axes
         duplicate_rho_zero (bool): choose whether to duplicate the entries corresponding to rho=0
             This option is provided because all the experiments were run with the entries duplicated
             although it was not intentional.
+        angular_axis_last (bool): specify whether to assume the angular axis comes last
+            for simplicity, we always assume that the angular and radial axes are the last
+            two axes overall.
     Returns:
         padded_tensor (torch Tensor): the resulting padded tensor
             with shape(..., N_rho+2*pad_width, N_theta+2*pad_width)
         center_slice (np slice object): a slice representing the original region
     """
     # Hard-coded to simplify the indexing logic
-    radial_axis = -2
-    angular_axis = -1
+    if angular_axis_last:
+        radial_axis  = -2
+        angular_axis = -1
+    else:
+        radial_axis  = -1
+        angular_axis = -2
 
     pad_width = pad_width if pad_width is not None else (int(w_2d / 2 - 1) + 1)
 
@@ -122,11 +135,14 @@ def polar_conv_padder(
     # The exterior is assumed to be zero-padded and therefore does not
     # need to be touched
     radial_start = 0 if duplicate_rho_zero else 1
+    value_src_slice = np.s_[..., radial_start : radial_start + pad_width, :] \
+        if angular_axis_last \
+        else np.s_[..., :, radial_start : radial_start + pad_width]
     values_to_fill_in = torch.flip(
-        input_tensor[..., radial_start : radial_start + pad_width, :],
+        input_tensor[value_src_slice],
         dims=(radial_axis,),
     )
-    values_to_fill_in = torch.roll(values_to_fill_in, shifts=N_theta // 2, dims=-1)
+    values_to_fill_in = torch.roll(values_to_fill_in, shifts=N_theta // 2, dims=angular_axis)
 
     # 2.5. Make adjustments for odd-numbered outputs
     if N_theta % 2 == 1:
@@ -140,19 +156,27 @@ def polar_conv_padder(
         values_to_fill_in = circular_convolve1d(
             values_to_fill_in, cubic_interp_filter, roll_offset=2, axis=angular_axis
         )
-    padded_tensor[..., :pad_width, pad_width:-pad_width] = values_to_fill_in
+    if angular_axis_last:
+        internal_val_dst = np.s_[..., :pad_width, pad_width:-pad_width]
+    else:
+        internal_val_dst = np.s_[..., pad_width:-pad_width, :pad_width]
+    padded_tensor[internal_val_dst] = values_to_fill_in
 
     # 3. Extend in the angular direction
-    # Left side
-    padded_tensor[..., :, :pad_width] = padded_tensor[
-        ..., :, -2 * pad_width : -pad_width
-    ]
-    # Right side
-    padded_tensor[..., :, -pad_width:] = padded_tensor[
-        ..., :, pad_width : 2 * pad_width
-    ]
+    # Extend on the left and right sides
+    if angular_axis_last:
+        left_dst  = np.s_[..., :, :pad_width]
+        left_src  = np.s_[..., :, -2 * pad_width : -pad_width]
+        right_dst = np.s_[..., :, -pad_width:]
+        right_src = np.s_[..., :, pad_width : 2 * pad_width]
+    else:
+        left_dst  = np.s_[...,  :pad_width, :]
+        left_src  = np.s_[...,  -2 * pad_width : -pad_width, :]
+        right_dst = np.s_[...,  -pad_width:, :]
+        right_src = np.s_[...,  pad_width : 2 * pad_width, :]
+    padded_tensor[left_dst] = padded_tensor[left_src]
+    padded_tensor[right_dst] = padded_tensor[right_src]
     return padded_tensor, center_slice
-
 
 def circular_convolve1d(
     input_tensor: torch.Tensor,
