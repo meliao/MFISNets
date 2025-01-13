@@ -28,8 +28,8 @@ python train_MFISNet_Parallel.py \
 -results_fp $RESULTS_FP \
 -n_epochs 50 \
 -n_epochs_per_log 5 \
--lr_init 5e-04 \
--eta_min 5e-04 \
+-lr_init 1e-03 \
+-eta_min 1e-03 \
 -n_cnn_channels_1d 24 \
 -n_cnn_channels_2d 24 \
 -n_cnn_1d 3 \

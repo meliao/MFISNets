@@ -18,6 +18,7 @@ import shlex
 import numpy as np
 import h5py
 import torch
+from timeit import default_timer
 import pandas as pd
 import wandb
 
@@ -42,7 +43,11 @@ from src.data.data_io import load_dir
 from src.models.MFISNet_Refinement import (
     MFISNet_Refinement,
 )
-from src.training_utils.train_loop import train, evaluate_losses_on_dataloader
+from src.training_utils.train_loop import (
+    train,
+    evaluate_losses_on_dataloader,
+    EarlyStopper,
+)
 from src.training_utils.loss_functions import (
     MSEModule,
 )
@@ -91,6 +96,19 @@ def setup_args(argument_string: str = None) -> argparse.Namespace:
     parser.add_argument("-warm_start_init", default=False, action="store_true")
     parser.add_argument("-lr_decrease_factor", default=None, type=float)
     parser.add_argument("-noise_to_signal_ratio", default=None, type=float)
+    parser.add_argument(
+        "-init_mode",
+        default="original",
+        choices=[
+            "original",
+            "uniform-with-old-scale",
+            "normal-with-old-scale",
+            "he-normal",
+        ],
+    )
+    parser.add_argument("-train_without_filters", default=False, action="store_true")
+    parser.add_argument("-early_stopping", default=False, action="store_true")
+    parser.add_argument("-min_delta", type=float, default=1e-03)
 
     if argument_string is None:
         # Parse the arguments from the system's argv
@@ -185,6 +203,7 @@ def load_data(
     wavenumbers: List[str],
     truncate_num: int = None,
     noise_to_sig_ratio: float = None,
+    train_without_filters: bool = False,
 ) -> MultiFreqResidData:
     """This function loads all of the samples indicated by the data_dir.
     It arranges the data and returns a MultiFreqResidData object.
@@ -234,7 +253,10 @@ def load_data(
             truncate_num=truncate_num,
         )
         d_mh[:, i] = dd_i[D_MH]
-        q_polar_lpf[:, i] = dd_i[Q_POLAR_LPF]
+        if train_without_filters:
+            q_polar_lpf[:, i] = dd_i[Q_POLAR]
+        else:
+            q_polar_lpf[:, i] = dd_i[Q_POLAR_LPF]
 
     if noise_to_sig_ratio is not None:
         logging.info("Adding noise with noise-to-signal ratio %f", noise_to_sig_ratio)
@@ -321,6 +343,7 @@ def main(args: argparse.Namespace) -> None:
         args.wavenumbers,
         args.truncate_num,
         noise_to_sig_ratio=args.noise_to_signal_ratio,
+        train_without_filters=args.train_without_filters,
     )
     dset_val, val_metadata_dd = load_data(
         args.meas_dir_val_frmt,
@@ -328,6 +351,7 @@ def main(args: argparse.Namespace) -> None:
         args.wavenumbers,
         args.truncate_num_val,
         noise_to_sig_ratio=args.noise_to_signal_ratio,
+        train_without_filters=args.train_without_filters,
     )
 
     # Grab some metadata
@@ -366,6 +390,7 @@ def main(args: argparse.Namespace) -> None:
         N_cnn_1d=args.n_cnn_1d,
         N_cnn_2d=args.n_cnn_2d,
         N_freqs=len(args.wavenumbers),
+        init_mode=args.init_mode,
     )
 
     if pre_existing_bool:
@@ -378,13 +403,14 @@ def main(args: argparse.Namespace) -> None:
 
     ###########################################################################
     # SET UP LOG FUNCTION
-    def log_function(model_0, epoch_local):
+    def log_function(model_0, epoch_local) -> bool:
         """
         NEED TO SET ANEW:
         loss_fn_dd
         epoch_stagger
         training_part
         n_epochs_this_step
+        early_stopper (Optional)
 
         OTHER OUTER SCOPE STUFF:
         train_dloader,
@@ -455,6 +481,8 @@ def main(args: argparse.Namespace) -> None:
                 "output_dir_train": args.output_dir_train,
                 "output_dir_val": args.output_dir_val,
                 "lr_decrease_factor": args.lr_decrease_factor,
+                "init_mode": args.init_mode,
+                "warm_start_init": args.warm_start_init,
             }
             for k, v in train_loss_dd.items():
                 train_dd["train_" + k] = torch.mean(v).item()
@@ -473,6 +501,13 @@ def main(args: argparse.Namespace) -> None:
         torch.save(model_0.state_dict(), fp_weights)
         model_0 = model_0.to(device)
 
+        # Check early stopping criterion
+        if args.early_stopping:
+            # Early stopping is based on the validation relative L2 error
+            return early_stopper.early_stop(train_dd["val_rel_l2"])
+        else:
+            return False
+
     ##########################################################################################
     # PRETRAIN EACH BLOCK
     loss_module = MSEModule()
@@ -486,6 +521,9 @@ def main(args: argparse.Namespace) -> None:
     }
     train_dloader = torch.utils.data.DataLoader(dset_train, batch_size=args.batch_size)
     val_dloader = torch.utils.data.DataLoader(dset_val, batch_size=args.batch_size)
+
+    # Begin training timer
+    t0 = default_timer()
 
     if args.n_epochs_pretrain:
         for i in range(final_training_part_int, N_freqs):
@@ -522,6 +560,10 @@ def main(args: argparse.Namespace) -> None:
             else:
                 lr_i = args.lr_init
                 eta_min_i = args.eta_min
+
+            # Optionally set up early stopping
+            if args.early_stopping:
+                early_stopper = EarlyStopper(min_delta=args.min_delta)
             model = train(
                 model=model,
                 n_epochs=n_epochs_this_step,
@@ -567,7 +609,21 @@ def main(args: argparse.Namespace) -> None:
                 )
                 model.inverse_networks[j].load_state_dict(state_dict_j)
 
-            # If we're using the warm start weight initialization, use the wrights of the current
+                if j != 0:
+                    # Also set the filtering blocks
+                    key_str_j_filtering = f"filtering_blocks.{j-1}."
+                    ll = len(key_str_j_filtering)
+                    state_dict_j_filtering = {
+                        k[ll:]: v
+                        for k, v in state_dict.items()
+                        if k.startswith(key_str_j_filtering)
+                    }
+
+                    model.filtering_blocks[j - 1].load_state_dict(
+                        state_dict_j_filtering
+                    )
+
+            # If we're using the warm start weight initialization, use the weights of the current
             # block to initialize the next block.
             if args.warm_start_init and i + 1 < N_freqs:
                 key_str_i = f"inverse_networks.{i}."
@@ -621,6 +677,10 @@ def main(args: argparse.Namespace) -> None:
     else:
         lr_i = args.lr_init
         eta_min_i = args.eta_min
+
+    # Optionally set up early stopping
+    if args.early_stopping:
+        early_stopper = EarlyStopper(min_delta=args.min_delta)
     model = train(
         model=model,
         n_epochs=n_epochs_this_step,
@@ -634,6 +694,10 @@ def main(args: argparse.Namespace) -> None:
         log_function=log_function,
         loss_function=loss_module,
     )
+
+    t1 = default_timer()
+
+    logging.info("Complete model training time is %f sec", t1 - t0)
 
     if not args.dont_write_outputs:
         #######################################################################

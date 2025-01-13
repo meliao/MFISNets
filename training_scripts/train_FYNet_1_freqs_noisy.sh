@@ -28,7 +28,7 @@ python train_MFISNet_Fused.py \
     --n_cnn_2d 3 \
     --n_cnn_channels_1d 24 \
     --n_cnn_channels_2d 24 \
-    --kernel_size_1d 40 \
+    --kernel_size_1d 60 \
     --kernel_size_2d 5 \
     --merge_middle_freq_channels true \
     --polar_padding true \

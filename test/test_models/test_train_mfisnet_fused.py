@@ -24,6 +24,7 @@ from src.data.data_io import (
     load_dir,
     load_hdf5_to_dict,
     save_dict_to_hdf5,
+    load_multifreq_dataset,
 )
 
 from src.utils.logging_utils import parse_val
@@ -100,7 +101,7 @@ class Test_train_mfisnet:
             os.path.join(tiny_debugging_dataset, f"train_measurements_nu_{nu}")
             for nu in wavenumbers
         ]
-        train_dd = load_multifreq_dataset(
+        train_dd, _ = load_multifreq_dataset(
             freq_dir_list,
             truncate_num=truncate_num,
             noise_to_sig_ratio=0,
@@ -159,7 +160,7 @@ class Test_train_mfisnet:
         # In case we need to report the seed I guess...
         rng_base = np.random.default_rng()
         rng_dirs_seed = rng_base.integers(1 << 16, size=1)
-        model_seed = rng_base.integers(1 << 16, size=1)
+        model_seed = rng_base.integers(1 << 16, size=1).item()
         rng_dirs = np.random.default_rng(rng_dirs_seed)
         # model_seed = 17329 # this gives trouble if we only allow 10 epochs (for val err)
         # model_seed = 50895 # try this
@@ -211,6 +212,8 @@ class Test_train_mfisnet:
                 # wandb_mode="online",
                 wandb_mode="disabled",
                 big_init=True,
+                use_smoothed_targets=False,
+                init_mode="he-normal",
             )
             arg_dict = {
                 field: getattr(args, field)

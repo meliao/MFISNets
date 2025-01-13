@@ -170,7 +170,7 @@ def main(args: argparse.Namespace) -> None:
 
     ### Load Evaluation dataset to a dictionary and local variables ###
     logging.info(f"Loading evaluation dataset")
-    eval_dd = load_multifreq_dataset(
+    eval_dd, eval_metadata_dd = load_multifreq_dataset(
         eval_files,
         # key_replacement=key_replacement,
         noise_to_sig_ratio=args.noise_to_signal_ratio,

@@ -231,6 +231,26 @@ class TestHelmholtzSolverAccelerated:
             N_PIXELS,
         )
 
+    def test_8(self) -> None:
+        """Tests that Helmholtz_solve_interior routine returns without error
+        when radially_symmetric=True
+        """
+
+        scattering_obj = np.zeros((N_PIXELS, N_PIXELS))
+        z = int(N_PIXELS / 2)
+        scattering_obj[z : z + 2, z : z + 2] = np.ones_like(
+            scattering_obj[z : z + 2, z : z + 2]
+        )
+        dirs = np.array([np.pi / 4, -np.pi / 4])
+        n_dirs = dirs.shape[0]
+
+        out = SOLVER_OBJ.Helmholtz_solve_interior(
+            dirs, scattering_obj, radially_symmetric=True
+        )
+
+        for x in out:
+            assert x.shape == (1, N_PIXELS, N_PIXELS)
+
 
 if __name__ == "__main__":
     pytest.main()

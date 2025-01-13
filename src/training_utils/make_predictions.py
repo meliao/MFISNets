@@ -1,4 +1,5 @@
 from typing import Dict, Callable
+from timeit import default_timer
 import torch
 import numpy as np
 import os
@@ -53,6 +54,12 @@ def make_preds_on_dataset(
     Returns:
         None
     """
+
+    # Now, convert the predictions to cartesian coordinates.
+    to_cart_fn = prepare_polar_to_cart(
+        experiment_info[X_VALS], experiment_info[THETA_VALS], experiment_info[RHO_VALS]
+    )
+    t0 = default_timer()
     preds_polar = torch.zeros(
         (
             len(dloader.dataset),
@@ -76,10 +83,6 @@ def make_preds_on_dataset(
             nn = i * dloader.batch_size
             preds_polar[nn : nn + n_samples] = preds.to("cpu")
 
-    # Now, convert the predictions to cartesian coordinates.
-    to_cart_fn = prepare_polar_to_cart(
-        experiment_info[X_VALS], experiment_info[THETA_VALS], experiment_info[RHO_VALS]
-    )
     preds_cart = torch.zeros(
         (
             len(dloader.dataset),
@@ -91,6 +94,9 @@ def make_preds_on_dataset(
     for i in range(0, len(preds_polar), shard_size):
         preds_cart[i : i + shard_size] = to_cart_fn(preds_polar[i : i + shard_size])
 
+    t1 = default_timer()
+
+    logging.info("Completed predictions in %f seconds", t1 - t0)
     if output_dir is None:
         return preds_cart.numpy(), preds_polar.numpy()
 

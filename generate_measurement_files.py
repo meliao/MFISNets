@@ -374,7 +374,9 @@ def main(args: argparse.Namespace) -> None:
                     d_mh_eff[idx_eff] = np.full_like(d_mh_eff[idx_eff], np.nan)
                     logging.warning("Singular matrix for sample %i", idx_abs)
                     computed_soln_bool = False
+                    # NOTE: this breaks out of the entire chunk rather than the invidivual sample
                     break
+                    # continue
 
             # Log updates from this sample sample
             sample_completion[idx_abs] = True  # mark as complete :D

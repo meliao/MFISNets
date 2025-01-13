@@ -39,6 +39,7 @@ class FYNetInverse(torch.nn.Module):
         theta_vals: np.ndarray = None,
         output_as_cart: bool = False,
         skip_conv_calc: bool = False,
+        init_mode: str = None,
     ) -> None:
         """The inverse NN described in section 2 of FY19. NN inputs have shape
         (batch, N_M, N_H, 2) and outputs have shape (batch, N_theta, N_rho),
@@ -61,6 +62,9 @@ class FYNetInverse(torch.nn.Module):
             output_cart (bool): whether to also return the output in cartesian coordinates (keep polar form)
             skip_conv_calc (bool): whether to skip the convolution operator setup;
                 intended for when the conv operators will be loaded (for interpolation to the cartesian grid)
+            init_mode (str): choose which mode to use for initializing parameters
+                Options:
+                    [original, uniform-with-old-scale, normal-with-old-scale, he-normal]
         """
         super().__init__()
 
@@ -72,6 +76,9 @@ class FYNetInverse(torch.nn.Module):
         self.w_2d = w_2d
         self.N_cnn_1d = N_cnn_1d
         self.N_cnn_2d = N_cnn_2d
+
+        init_mode = init_mode.lower() if init_mode is not None else "original"
+        self.init_mode = init_mode
 
         # First, prepare interpolation operators
         self.output_as_cart = output_as_cart
@@ -87,6 +94,7 @@ class FYNetInverse(torch.nn.Module):
 
         # Set up neural networks parameters
         self.weight_dtype = torch.complex64
+        self.real_dtype = torch.float32
         assert (
             self.w_2d % 2
         ), f"I can't figure out how to do padding for kernel sizes divisible by 2, {self.w_2d}"
@@ -95,80 +103,108 @@ class FYNetInverse(torch.nn.Module):
         padding_2d = int(self.w_2d / 2 - 1) + 1
 
         # 1. Initialize conv 1d parameters
-        in_channels_0 = self.N_h * 2
-        scale_0 = 2 / in_channels_0
-        params_0 = torch.nn.Parameter(
-            scale_0
-            * torch.rand(self.c_1d, in_channels_0, self.w_1d, dtype=self.weight_dtype)
-        )
-        self.conv_1d_layers = torch.nn.ParameterList([params_0])
+        # in_channels_0 = self.N_h * 2
+        # scale_0 = 2 / in_channels_0
+        # params_0 = torch.nn.Parameter(
+        #     scale_0
+        #     * torch.rand(self.c_1d, in_channels_0, self.w_1d, dtype=self.weight_dtype)
+        # )
+        # self.conv_1d_layers = torch.nn.ParameterList([params_0])
 
-        for _ in range(self.N_cnn_1d - 2):
-            scale_i = 2 / self.c_1d
-            params_i = torch.nn.Parameter(
-                scale_i
-                * torch.rand(self.c_1d, self.c_1d, self.w_1d, dtype=self.weight_dtype)
+        # for _ in range(self.N_cnn_1d - 2):
+        #     scale_i = 2 / self.c_1d
+        #     params_i = torch.nn.Parameter(
+        #         scale_i
+        #         * torch.rand(self.c_1d, self.c_1d, self.w_1d, dtype=self.weight_dtype)
+        #     )
+        #     self.conv_1d_layers.append(params_i)
+
+        # scale_last = 2 / self.c_1d
+        # params_last = torch.nn.Parameter(
+        #     scale_last
+        #     * torch.rand(self.N_rho, self.c_1d, self.w_1d, dtype=self.weight_dtype)
+        # )
+        # self.conv_1d_layers.append(params_last)
+
+        ### Initialize parameter values ###
+        ## 1D CNN
+        # First layer
+        # Dimensions along the freq/h axis
+        self.c_1d_in  = self.N_h * 2
+        self.c_1d_int = self.c_1d # internal layers
+        self.c_1d_out = self.N_rho
+        self.c_2d_in  = 1
+        self.c_2d_int = self.c_2d
+        self.c_2d_out = 1
+
+        cnn1d_freq_h_axis_dims = [
+            self.c_1d_in, # Input
+            *((self.N_cnn_1d-1)*[self.c_1d_int]), # Interior
+            self.c_1d_out,  # Final layer of 1D section
+        ]
+        logging.info(f"During the 1D Conv stage, freq/h axis has {cnn1d_freq_h_axis_dims} channels")
+
+        self.conv_1d_layers = torch.nn.ParameterList([])
+        for li in range(self.N_cnn_1d):
+            h_dim_in  = cnn1d_freq_h_axis_dims[li]
+            h_dim_out = cnn1d_freq_h_axis_dims[li+1]
+            scale_old = 2 / h_dim_in
+            scale_he  = torch.sqrt(torch.tensor(2 / h_dim_in, dtype=self.real_dtype))
+
+            if init_mode == "original":
+                scaling = scale_old
+                rand_fn = torch.rand
+            elif init_mode == "uniform-with-old-scale":
+                scaling = scale_old
+                rand_fn = lambda x: 2*torch.rand(x)-1
+            elif init_mode == "normal-with-old-scale":
+                scaling = scale_old
+                rand_fn = torch.randn
+            elif init_mode == "he-normal":
+                rand_fn  = torch.randn
+                scaling  = scale_he
+            else:
+                raise ValueError(
+                    f"FYNet.__init__ received init_mode={init_mode} "
+                    f"which is not in the recognized list of options: [original, "
+                    f"uniform-with-old-scale, normal-with-old-scale, he-normal]",
+                )
+            new_params = scaling * rand_fn(
+                h_dim_out,
+                h_dim_in,
+                self.w_1d,
+                dtype=self.weight_dtype
             )
-            self.conv_1d_layers.append(params_i)
 
-        scale_last = 2 / self.c_1d
-        params_last = torch.nn.Parameter(
-            scale_last
-            * torch.rand(self.N_rho, self.c_1d, self.w_1d, dtype=self.weight_dtype)
-        )
-        self.conv_1d_layers.append(params_last)
+            self.conv_1d_layers.append(new_params)
 
         # 2. Initialize conv 2d parameters
-        if self.N_cnn_2d > 1:
-            self.conv_2d_layers = torch.nn.ParameterList(
-                [
-                    torch.nn.Conv2d(
-                        in_channels=1,
-                        out_channels=self.c_2d,
-                        kernel_size=self.w_2d,
-                        padding=padding_2d,
-                        padding_mode="circular",
-                    )
-                ]
-            )
+        cnn2d_freq_h_axis_dims = [
+            self.c_2d_in, # Input (=1)
+            *((self.N_cnn_2d-1)*[self.c_2d_int]), # Interior
+            self.c_2d_out, # Final layer (=1)
+        ]
+        logging.info(f"During the 2D Conv stage, freq/h axis has {cnn2d_freq_h_axis_dims} channels")
+        self.conv_2d_layers = torch.nn.ParameterList([])
+        for li in range(self.N_cnn_2d):
+            freq_dim_in  = cnn2d_freq_h_axis_dims[li]
+            freq_dim_out = cnn2d_freq_h_axis_dims[li+1]
 
-            for _ in range(self.N_cnn_2d - 2):
-                self.conv_2d_layers.append(
-                    torch.nn.Conv2d(
-                        in_channels=self.c_2d,
-                        out_channels=self.c_2d,
-                        kernel_size=self.w_2d,
-                        padding=padding_2d,
-                        padding_mode="circular",
-                    )
-                )
-            # Append the last layer that outputs N_rho channels
-            self.conv_2d_layers.append(
-                torch.nn.Conv2d(
-                    in_channels=self.c_2d,
-                    out_channels=1,
-                    kernel_size=self.w_2d,
-                    padding=padding_2d,
-                    padding_mode="circular",
-                )
+            new_layer = torch.nn.Conv2d(
+                in_channels=freq_dim_in,
+                out_channels=freq_dim_out,
+                kernel_size=self.w_2d,
+                padding=padding_2d,
+                padding_mode="zeros"
             )
-        else:
-            self.conv_2d_layers = torch.nn.ParameterList(
-                [
-                    torch.nn.Conv2d(
-                        in_channels=1,
-                        out_channels=1,
-                        kernel_size=self.w_2d,
-                        padding=padding_2d,
-                        padding_mode="circular",
-                    )
-                ]
-            )
+            if init_mode == "he-normal":
+                torch.nn.init.kaiming_normal_(new_layer.weight, nonlinearity="relu")
+            self.conv_2d_layers.append(new_layer)
 
         self.relu = torch.nn.ReLU()
 
     def forward(
-        self, x: torch.Tensor, pass_intermediate_val: bool = False
+        self, x: torch.Tensor
     ) -> torch.Tensor | Tuple[torch.Tensor]:
         """Forward pass of the inversion model. Maps from wave fields to scattering
         objects. Here's a list of the intermediate shapes of the data
@@ -196,46 +232,29 @@ class FYNetInverse(torch.nn.Module):
         x = x.reshape((n_batch, n_M, -1))
         x = x.permute((0, 2, 1))
 
-        intermediate_vals = {}
-        intermediate_vals["input data"] = x.detach().clone()
-
         for i, kernel_weights in enumerate(self.conv_1d_layers):
             x = conv_in_fourier_space(x, kernel_weights).real
-            intermediate_vals["1D-conv (pre-relu)", i] = x.detach().clone()
             x = self.relu(x)
-            intermediate_vals["1D-conv (post-relu)", i] = x.detach().clone()
-
 
         # x has shape (n_batch, 2d_conv_channel_dim, 1d_conv_channel_dim, N_M)
-        x = x.view((n_batch, 1, -1, n_M))
-        intermediate_vals["Post-1D-conv"] = x.detach().clone()
+        x = x.view((n_batch, 1, -1, n_M)) # (N_batch, 1, N_rho, N_m) where N_m=N_theta
 
-        # Convolutions in the (N_M, N_H) plane
-        for i in range(self.N_cnn_2d - 1):
+        # Convolutions in the (N_rho, N_m) plane
+        for i in range(self.N_cnn_2d):
             layer = self.conv_2d_layers[i]
-            x = apply_conv_with_polar_padding(layer, x)
-            intermediate_vals["2D-conv (pre-relu)", i] = x.detach().clone()
-            # print("After 2D convolution x shape ", x.shape)
-            x = self.relu(x)
-            intermediate_vals["2D-conv (post-relu)", i] = x.detach().clone()
+            x = apply_conv_with_polar_padding(layer, x, angular_axis_last=True)
 
-        final_layer = self.conv_2d_layers[-1]
-        x = apply_conv_with_polar_padding(final_layer, x)
-        intermediate_vals["2D-conv (pre-relu)", self.N_cnn_2d - 1] = x.detach().clone()
+            if i == self.N_cnn_2d -1 :
+                x = self.relu(x)
 
-        out_polar = x.view((n_batch, -1, n_M))
-        out_polar = out_polar.permute((0, 2, 1))
+
+        out_polar = x.view((n_batch, -1, n_M)) # send to (N_batch, N_rho, N_theta)
+        out_polar = out_polar.permute((0, 2, 1)) # send to (N_batch, N_theta, N_rho)
         result = out_polar
 
         if self.output_as_cart:
             out_cart = self.polar_to_cart(out_polar)
             result = out_polar, out_cart
-
-        if pass_intermediate_val:
-            if self.output_as_cart:
-                result = (*result, intermediate_vals)
-            else:
-                result = (result, intermediate_vals)
 
         return result
 
@@ -337,161 +356,3 @@ class FYNetInverse(torch.nn.Module):
             return res
 
         self.polar_to_cart = my_polar_to_cart
-
-# We include the version of FYNet that performs the forward scattering problem
-# However, this is not the network we typically refer to.
-# The mechanics are very similar, but the dimensions are flipped.
-class FYNetForward(torch.nn.Module):
-    def __init__(
-        self,
-        N_cnn_1d: int,
-        c: int,
-        kernel_modes: int,
-        N_rho: int,
-        N_h: int,
-        big_init: bool = False,
-    ) -> None:
-        """The forward NN described in section 2 of FY19.
-        NN inputs have shape (batch, N_theta, N_rho) and outputs have shape
-        (batch, N_M, N_H). We assume N_theta == N_M and N_rho and N_H are
-        multiples
-
-        Args:
-            N_cnn_1d (int): Number of CNN layers
-            c (int): Number of channels
-            kernel_modes (int): _description_
-            N_rho (int): _description_
-            N_h (int): _description_
-            big_init (bool): decide whether to use the big or small initialization scale
-        """
-        super().__init__()
-        self.N_cnn_1d = N_cnn_1d
-        self.c = c
-        self.kernel_modes = kernel_modes
-        self.N_rho = N_rho
-        self.N_h = N_h
-        self.big_init = big_init
-
-        # The output shape is (batch, N_M, N_H) and the array should be complex.
-        # And we're assuming N_M = N_theta
-        self.n_out_channels = N_h
-
-        # Choosing the padding side dependent on the kernel size so that
-        # the convolution dimension stays the same.
-        # assert self.kernel_size % 2, "Code requires kernel sizes to be odd"
-        # padding_size = int(self.kernel_size / 2 - 1) + 1
-
-        if self.N_cnn_1d > 1:
-            if big_init:
-                scale_0 = 2 / self.N_rho
-            else:
-                scale_0 = 1 / (self.N_rho * self.c)
-            params_0 = torch.nn.Parameter(
-                scale_0
-                * torch.rand(
-                    self.c, self.N_rho, self.kernel_modes, dtype=torch.complex64
-                )
-            )
-            self.conv_1d_layers = torch.nn.ParameterList([params_0])
-
-            for _ in range(self.N_cnn_1d - 2):
-                if big_init:
-                    scale_i = 2 / self.c
-                else:
-                    scale_i = 1 / (self.c * self.c)
-                params_i = torch.nn.Parameter(
-                    scale_i
-                    * torch.rand(
-                        self.c, self.c, self.kernel_modes, dtype=torch.complex64
-                    )
-                )
-                self.conv_1d_layers.append(params_i)
-            # Append the output layer to the list.
-
-            if big_init:
-                scale_last = 2 / self.c
-            else:
-                scale_last = 1 / (self.c * self.n_out_channels)
-
-            params_last = torch.nn.Parameter(
-                scale_last
-                * torch.rand(
-                    self.n_out_channels,
-                    self.c,
-                    self.kernel_modes,
-                    dtype=torch.complex64,
-                )
-            )
-            self.conv_1d_layers.append(params_last)
-        else:
-            if big_init:
-                scale_0 = 2 / self.N_rho
-            else:
-                scale_0 = 1 / (self.N_rho * self.n_out_channels)
-            params_0 = torch.nn.Parameter(
-                scale_0
-                * torch.rand(
-                    self.n_out_channels,
-                    self.N_rho,
-                    self.kernel_modes,
-                    dtype=torch.complex64,
-                )
-            )
-            self.conv_1d_layers = torch.nn.ParameterList([params_0])
-
-        self.relu = torch.nn.ReLU()
-
-        for p in self.parameters():
-            p = p.to(torch.complex64)
-
-    def _complex_relu(self: None, x: torch.Tensor) -> torch.Tensor:
-        """
-        Casts x as real, imag. Then apply ReLU. Then cast back to complex.
-        """
-        y = torch.view_as_real(x)
-        z = self.relu(y)
-        return torch.view_as_complex(z)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the model. Here's a list of intermediate
-        shapes of the inputs:
-        (batch, N_theta, N_rho) # Input shape
-        -> (batch, N_rho, N_theta) # Transpose because convolution is along the last dimension
-        -> (batch, self.c, N_theta) # After a convolution, channel number changes
-        -> (batch, self.n_h, N_theta) # The last conv block outputs the desired num channels
-        -> (batch, N_theta, self.n_h) # Permute to meet output shape requirements
-
-        Args:
-            x (torch.Tensor): Has shape (batch, N_theta, N_rho)
-
-        Returns:
-            torch.Tensor: Has shape (batch, N_M, N_H)
-        """
-        n_batch = x.shape[0]
-        n_theta = x.shape[1]
-
-        # Now the shape will be (batch, N_rho, N_theta). In pytorch the
-        # channel dimension is the penultimate one and convolution is performed
-        # along the last dimension. So this is what we want.
-        x = x.permute(0, 2, 1)
-
-        # Convolutions along the N_theta dimension
-        for i in range(self.N_cnn_1d - 1):
-            kernel_weights = self.conv_1d_layers[i]
-            x = conv_in_fourier_space(x, kernel_weights)
-            x = self._complex_relu(x)
-
-        # Apply the final conv1d layer without ReLU
-        kernel_weights = self.conv_1d_layers[-1]
-
-        x = conv_in_fourier_space(x, kernel_weights)
-
-        # Do whatever reshaping is necessary
-        # out_shape = (n_batch, n_theta, self.N_h)
-        out = x.permute(0, 2, 1)
-        return out
-
-    def __repr__(self: None) -> str:
-        s = f"FYNetForward model with {self.N_cnn_1d} layers, channel dimension"
-        s += f" {self.c}, and kernels with # freq modes: {self.kernel_modes}"
-        return s
