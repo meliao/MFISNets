@@ -1,5 +1,5 @@
 # MFISNets
-Experiments for the preprint "Multi-Frequency Progressive Refinement for Learned Inverse Scattering", available on ArXiv [here](https://arxiv.org/abs/2405.13214). 
+Experiments for the preprint "Multi-Frequency Progressive Refinement for Learned Inverse Scattering", available at the Journal of Computational Physics [here](https://doi.org/10.1016/j.jcp.2025.113809). 
 
 Written by [Owen Melia](https://people.cs.uchicago.edu/~meliao/), [Olivia Tsang](http://github.com/oortsang), [Vasileios Charisopoulos](https://people.orie.cornell.edu/vc333/), [Yuehaw Khoo](https://www.stat.uchicago.edu/~ykhoo/), [Jeremy Hoskins](http://www.jghoskins.com/) and [Rebecca Willett](https://willett.psd.uchicago.edu/).
 
@@ -16,19 +16,21 @@ Each refinement block is a simple update to a previously-published architecture,
 
 
 ## Citation
-<!-- Interpreting scattered acoustic and electromagnetic wave patterns is a computational task that enables remote imaging in a number of important applications, including medical imaging, geophysical exploration, sonar and radar detection, and nondestructive testing of materials. However, accurately and stably recovering an inhomogeneous medium from far-field scattered wave measurements is a computationally difficult problem, due to the nonlinear and non-local nature of the forward scattering process. We design a neural network, called Multi-Frequency Inverse Scattering Network (MFISNet), and a training method to approximate the inverse map from far-field scattered wave measurements at multiple frequencies. We consider three variants of MFISNet, with the strongest performing variant inspired by the recursive linearization method -- a commonly used technique for stably inverting scattered wavefield data -- that progressively refines the estimate with higher frequency content.  -->
 
-If this code is useful to your research, please cite our preprint:
+If this code is useful to your research, please cite our paper:
 ```
-@misc{melia2024mfisnet,
-      title={Multi-Frequency Progressive Refinement for Learned Inverse Scattering}, 
-      author={Owen Melia and Olivia Tsang and Vasileios Charisopoulos and Yuehaw Khoo and Jeremy Hoskins and Rebecca Willett},
-      year={2024},
-      eprint={2405.13214},
-      archivePrefix={arXiv},
-      primaryClass={physics.comp-ph},
-      url={https://arxiv.org/abs/2405.13214}, 
+ @article{Melia_Tsang_Charisopoulos_Khoo_Hoskins_Willett_2025,
+      title={Multi-frequency progressive refinement for learned inverse scattering},
+      volume={527},
+      ISSN={0021-9991},
+      DOI={10.1016/j.jcp.2025.113809},
+      journal={Journal of Computational Physics},
+      author={Melia, Owen and Tsang, Olivia and Charisopoulos, Vasileios and Khoo, Yuehaw and Hoskins, Jeremy and Willett, Rebecca},
+      year={2025},
+      month=apr,
+      pages={113809}
 }
+
 ```
 This work was also presented as a poster at the AI for Science workshop at ICML 2024 and the Institute for Mathematical and Statistical Innovation's (IMSI) Computational Imaging Workshop.
 
