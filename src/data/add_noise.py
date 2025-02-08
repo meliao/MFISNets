@@ -52,7 +52,7 @@ def _add_noise_numpy(d: np.ndarray, noise_to_sig_ratio: float) -> np.ndarray:
         logging.debug("Adding complex values to the noise array.")
         noise += 1j * np.random.normal(size=d.shape).astype(d.dtype)
         norm_factor *= np.sqrt(2)
-    return d + noise_to_sig_ratio * d_norm / norm_factor * noise
+    return (d + noise_to_sig_ratio * d_norm / norm_factor * noise).astype(d.dtype)
 
 
 def _add_noise_torch(d: torch.Tensor, noise_to_sig_ratio: float) -> torch.Tensor:
@@ -82,4 +82,4 @@ def _add_noise_torch(d: torch.Tensor, noise_to_sig_ratio: float) -> torch.Tensor
                 ]
             )
         )
-    return d + noise_to_sig_ratio * d_norm / norm_factor * noise
+    return (d + noise_to_sig_ratio * d_norm / norm_factor * noise).to(d.dtype)
